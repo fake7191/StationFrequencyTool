@@ -73,14 +73,14 @@ def fetch_nr_cif(username: str, password: str) -> bytes:
 # CIF parsing helpers
 # ---------------------------------------------------------------------------
 
-def _decode(raw: bytes) -> list:
+def _decode(raw):
     try:
         return raw.decode("utf-8").splitlines()
     except UnicodeDecodeError:
         return raw.decode("latin-1").splitlines()
 
 
-def _load_bytes(raw: bytes, filename: str = "") -> tuple:
+def _load_bytes(raw, filename=""):
     """
     Accept raw bytes that may be:
       - a gzip-compressed CIF (.gz)
@@ -126,7 +126,7 @@ def _parse_yymmdd(s: str):
         return None
 
 
-def _days_active(days_run: str) -> set:
+def _days_active(days_run):
     if not days_run or len(days_run) < 7:
         return set()
     return {i for i, ch in enumerate(days_run[:7]) if ch == "1"}
@@ -137,7 +137,7 @@ def _is_public_stop(activity: str) -> bool:
     return not (acts >= {"-D", "-U"})
 
 
-def parse_msn(lines: list) -> dict:
+def parse_msn(lines):
     stations = {}
     for line in lines:
         if len(line) < 39 or line[0] != "A":
@@ -150,8 +150,7 @@ def parse_msn(lines: list) -> dict:
     return stations
 
 
-def parse_cif(lines: list, passenger_only: bool = True,
-              stp_include: set = None) -> tuple:
+def parse_cif(lines, passenger_only=True, stp_include=None):
     if stp_include is None:
         stp_include = {"P", "O", "N"}
 
@@ -235,7 +234,7 @@ def parse_cif(lines: list, passenger_only: bool = True,
     return schedules, tiploc_map
 
 
-def apply_stp(schedules: list) -> list:
+def apply_stp(schedules):
     by_uid = defaultdict(list)
     for s in schedules:
         by_uid[s["uid"]].append(s)
@@ -258,7 +257,7 @@ def apply_stp(schedules: list) -> list:
     return result
 
 
-def count_calls(schedules: list) -> dict:
+def count_calls(schedules):
     counts = defaultdict(lambda: [0] * 7)
     for s in schedules:
         active = _days_active(s["days_run"])
@@ -270,7 +269,7 @@ def count_calls(schedules: list) -> dict:
     return counts
 
 
-def build_dataframe(counts: dict, tiploc_map: dict) -> pd.DataFrame:
+def build_dataframe(counts, tiploc_map):
     rows = []
     for tiploc, day_counts in counts.items():
         info  = tiploc_map.get(tiploc, {"name": "", "crs": ""})
@@ -291,8 +290,7 @@ def build_dataframe(counts: dict, tiploc_map: dict) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
-def run_parse(file_map: dict, passenger_only: bool,
-              stp_tuple: tuple) -> pd.DataFrame:
+def run_parse(file_map, passenger_only, stp_tuple):
     cif_lines = None
     msn_lines = None
 
@@ -324,7 +322,7 @@ def run_parse(file_map: dict, passenger_only: bool,
 # Chart
 # ---------------------------------------------------------------------------
 
-def make_bar_chart(row: pd.Series, label: str) -> go.Figure:
+def make_bar_chart(row, label):
     values = [row[d] for d in DAYS]
     fig = go.Figure(go.Bar(
         x=DAY_LABELS, y=values,
@@ -371,9 +369,12 @@ with st.sidebar:
             )
 
             # Pull from secrets.toml if present, otherwise show input fields
-            _secrets = st.secrets.get("network_rail", {})
-            _user_from_secret = _secrets.get("username", "")
-            _pass_from_secret = _secrets.get("password", "")
+            try:
+                _user_from_secret = st.secrets["network_rail"]["username"]
+                _pass_from_secret = st.secrets["network_rail"]["password"]
+            except (KeyError, FileNotFoundError):
+                _user_from_secret = ""
+                _pass_from_secret = ""
 
             if _user_from_secret and _pass_from_secret:
                 nr_user = _user_from_secret
