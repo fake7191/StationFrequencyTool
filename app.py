@@ -353,64 +353,51 @@ with st.sidebar:
             nr_user = st.text_input("Username (email)")
             nr_pass = st.text_input("Password", type="password")
 
-        if st.button("Download & parse", type="primary",
-                     disabled=not (nr_user and nr_pass)):
-            with st.spinner("Downloading from Network Rail (~50 MB)…"):
-                try:
-                    raw = fetch_nr_cif(nr_user, nr_pass)
-                    st.session_state["nr_raw"]   = raw
-                    st.session_state["nr_fname"] = "CIF_ALL_FULL_DAILY.gz"
-                    st.success(f"Downloaded {len(raw)/1e6:.1f} MB.")
-                except requests.HTTPError as e:
-                    code = e.response.status_code if e.response is not None else "?"
-                    if code == 401:
-                        st.error("Authentication failed — check credentials.")
-                    else:
-                        st.error(f"HTTP {code} error — Network Rail may be blocking cloud IPs. Use the download command below instead.")
-                except Exception as e:
-                    st.error(f"Download failed: {e} — try the download command below.")
+        st.markdown("**Step 1 — download the CIF to your machine:**")
 
-        if "nr_raw" in st.session_state:
-            file_map[st.session_state["nr_fname"]] = st.session_state["nr_raw"]
-            mb = len(st.session_state["nr_raw"]) / 1e6
-            st.caption(f"CIF ready ({mb:.1f} MB).")
-
-        # --- Local download helper ---
-        with st.expander("Can't auto-download? Get a local download command"):
-            st.caption(
-                "Network Rail sometimes blocks cloud server IPs. "
-                "Run this command on your own machine, then upload the file below."
-            )
-            if nr_user and nr_pass:
-                curl_cmd = (
-                    f'curl -L -u "{nr_user}:{nr_pass}" \\\n'
-                    f'  "{NR_CIF_URL}" \\\n'
-                    f'  -o cif_latest.gz'
-                )
-                py_cmd = (
-                    f'python -c "\n'
-                    f'import requests\n'
-                    f'r = requests.get(\\"{NR_CIF_URL}\\", auth=(\\"{ nr_user }\\", \\"{ nr_pass }\\"), allow_redirects=True)\n'
-                    f'open(\\"cif_latest.gz\\", \\"wb\\").write(r.content)\n'
-                    f'print(f\\"Saved {{len(r.content)/1e6:.1f}} MB\\")"\n'
-                )
-                st.markdown("**curl (Mac / Linux / Windows with curl):**")
-                st.code(curl_cmd, language="bash")
-                st.markdown("**Python (any platform):**")
-                st.code(
-                    f"import requests\n"
-                    f'r = requests.get(\n'
-                    f'    "{NR_CIF_URL}",\n'
-                    f'    auth=("{nr_user}", "{nr_pass}"),\n'
-                    f'    allow_redirects=True,\n'
-                    f')\n'
-                    f'open("cif_latest.gz", "wb").write(r.content)\n'
-                    f'print(f"Saved {{len(r.content)/1e6:.1f}} MB")',
-                    language="python",
-                )
-                st.caption("Then upload `cif_latest.gz` using the Upload file option.")
+        if nr_user and nr_pass:
+            # Fetch the file on the Streamlit server and serve it to the
+            # browser as a download — no terminal needed on the user's machine.
+            if "cif_download_bytes" not in st.session_state:
+                if st.button("Fetch CIF from Network Rail", type="primary"):
+                    with st.spinner("Fetching from Network Rail (~50 MB)…"):
+                        try:
+                            raw = fetch_nr_cif(nr_user, nr_pass)
+                            st.session_state["cif_download_bytes"] = raw
+                            st.rerun()
+                        except requests.HTTPError as e:
+                            code = e.response.status_code if e.response is not None else "?"
+                            if code == 401:
+                                st.error("Authentication failed — check credentials.")
+                            else:
+                                st.error(f"HTTP {code} — could not reach Network Rail.")
+                        except Exception as e:
+                            st.error(f"Fetch failed: {e}")
             else:
-                st.caption("Enter your credentials above to generate the command.")
+                raw = st.session_state["cif_download_bytes"]
+                st.download_button(
+                    label=f"Save cif_latest.gz to your machine ({len(raw)/1e6:.1f} MB)",
+                    data=raw,
+                    file_name="cif_latest.gz",
+                    mime="application/gzip",
+                    type="primary",
+                )
+                if st.button("Fetch a fresh copy"):
+                    del st.session_state["cif_download_bytes"]
+                    st.rerun()
+
+        else:
+            st.button("Fetch CIF from Network Rail", disabled=True)
+
+        st.markdown("**Step 2 — upload it here:**")
+        st.caption("Once saved, upload the file using the widget below.")
+        uploaded_nr = st.file_uploader(
+            "Upload cif_latest.gz",
+            type=["gz", "zip", "mca", "cif"],
+            key="nr_upload",
+        )
+        if uploaded_nr:
+            file_map[uploaded_nr.name] = uploaded_nr.read()
 
     else:
         st.caption("Upload the TTIS zip, a Network Rail .gz, or a raw .MCA file.")
