@@ -369,8 +369,20 @@ with st.sidebar:
                 "[publicdatafeeds.networkrail.co.uk](https://publicdatafeeds.networkrail.co.uk). "
                 "Use your existing Network Rail open data account."
             )
-            nr_user = st.text_input("Username (email)", key="nr_user")
-            nr_pass = st.text_input("Password", type="password", key="nr_pass")
+
+            # Pull from secrets.toml if present, otherwise show input fields
+            _secrets = st.secrets.get("network_rail", {})
+            _user_from_secret = _secrets.get("username", "")
+            _pass_from_secret = _secrets.get("password", "")
+
+            if _user_from_secret and _pass_from_secret:
+                nr_user = _user_from_secret
+                nr_pass = _pass_from_secret
+                st.success("Credentials loaded from secrets.toml", icon="🔑")
+            else:
+                nr_user = st.text_input("Username (email)", key="nr_user")
+                nr_pass = st.text_input("Password", type="password", key="nr_pass")
+
             do_download = st.button("Download & parse", type="primary",
                                     disabled=not (nr_user and nr_pass))
 
