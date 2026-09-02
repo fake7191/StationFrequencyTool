@@ -188,24 +188,35 @@ def build_df(counts, tiploc_map):
 
 @st.cache_data(show_spinner=False)
 def run_parse(file_map, passenger_only, stp_tuple):
+    print("DEBUG run_parse: start, files={}".format(list(file_map.keys())))
     cif_lines, msn_lines = None, None
     for fname, raw in file_map.items():
+        print("DEBUG run_parse: _load_bytes for {}".format(fname))
         cl, ml = _load_bytes(raw, fname)
+        print("DEBUG run_parse: got cif={} msn={}".format(
+            len(cl) if cl else None, len(ml) if ml else None))
         if cl is not None and cif_lines is None:
             cif_lines = cl
         if ml is not None and msn_lines is None:
             msn_lines = ml
     if cif_lines is None:
         raise ValueError("No CIF data found in uploaded file.")
+    print("DEBUG run_parse: parse_cif start, lines={}".format(len(cif_lines)))
     schedules, tiploc_map = parse_cif(cif_lines, passenger_only, set(stp_tuple))
+    print("DEBUG run_parse: parse_cif done, schedules={} tiplocs={}".format(
+        len(schedules), len(tiploc_map)))
     if msn_lines:
+        print("DEBUG run_parse: merging MSN")
         for t, info in parse_msn(msn_lines).items():
             if t not in tiploc_map:
                 tiploc_map[t] = info
             else:
                 if info["name"]: tiploc_map[t]["name"] = info["name"]
                 if info["crs"]:  tiploc_map[t]["crs"]  = info["crs"]
-    return build_df(count_calls(apply_stp(schedules)), tiploc_map)
+    print("DEBUG run_parse: apply_stp + count_calls + build_df")
+    result = build_df(count_calls(apply_stp(schedules)), tiploc_map)
+    print("DEBUG run_parse: done, rows={}".format(len(result)))
+    return result
 
 def bar_chart(row, label):
     fig = go.Figure(go.Bar(
@@ -319,6 +330,10 @@ with st.sidebar:
 # Main
 # ---------------------------------------------------------------------------
 
+print("DEBUG: file_map keys =", list(file_map.keys()))
+for fname, raw in file_map.items():
+    print("DEBUG: file={} size={} first4={}".format(fname, len(raw), raw[:4].hex()))
+
 if not file_map:
     st.markdown("## UK Train Frequency Explorer")
     st.info(
@@ -330,30 +345,46 @@ if not file_map:
     st.stop()
 
 # Parse
+print("DEBUG: starting parse, passenger_only={}, stp={}".format(passenger_only, stp_options))
 try:
+    print("DEBUG: calling _load_bytes")
+    for fname, raw in file_map.items():
+        cl, ml = _load_bytes(raw, fname)
+        print("DEBUG: _load_bytes done, cif_lines={}, msn_lines={}".format(
+            len(cl) if cl else None,
+            len(ml) if ml else None))
+    print("DEBUG: calling run_parse")
     df_full = run_parse(
         file_map,
         passenger_only,
         tuple(sorted(stp_options)) if stp_options else ("P",),
     )
+    print("DEBUG: run_parse done, rows={}".format(len(df_full)))
 except Exception as e:
+    print("DEBUG: parse exception: {}".format(traceback.format_exc()))
     st.error("Parse error: {} — {}".format(type(e).__name__, e))
     st.code(traceback.format_exc())
     st.stop()
 
 # Filter
+print("DEBUG: starting filter")
 try:
     df = df_full.copy()
+    print("DEBUG: df copied, shape={}".format(df.shape))
     if crs_only:
         df = df[df["crs"].str.strip() != ""]
+        print("DEBUG: crs filter done, rows={}".format(len(df)))
     if name_filter.strip():
         q = name_filter.strip().upper()
         mask = (df["station_name"].str.upper().str.contains(q, na=False)
               | df["crs"].str.upper().str.contains(q, na=False)
               | df["tiploc"].str.upper().str.contains(q, na=False))
         df = df[mask]
+        print("DEBUG: name filter done, rows={}".format(len(df)))
     df = df.sort_values(sort_col, ascending=False).head(top_n).reset_index(drop=True)
+    print("DEBUG: filter complete, final rows={}".format(len(df)))
 except Exception as e:
+    print("DEBUG: filter exception: {}".format(traceback.format_exc()))
     st.error("Filter error: {} — {}".format(type(e).__name__, e))
     st.code(traceback.format_exc())
     st.stop()
