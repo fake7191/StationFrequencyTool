@@ -42,21 +42,43 @@ def _decode(raw):
     except UnicodeDecodeError:
         return raw.decode("latin-1").splitlines()
 
+def _iter_lines_gz(raw):
+    """Stream-decode a gzip bytes object line by line — avoids holding
+    the full decompressed content in memory at once."""
+    with gzip.open(io.BytesIO(raw), "rt", encoding="latin-1", errors="replace") as f:
+        for line in f:
+            yield line.rstrip("\n")
+
 def _load_bytes(raw, filename=""):
     name = filename.upper()
-    if name.endswith(".GZ") or raw[:2] == b"\x1f\x8b":
-        raw = gzip.decompress(raw)
-        name = name[:-3] if name.endswith(".GZ") else name
+    is_gz = name.endswith(".GZ") or raw[:2] == b"\x1f\x8b"
+
+    # gzip — stream decode, never decompress fully into RAM
+    if is_gz:
+        print("DEBUG _load_bytes: streaming gzip")
+        cif_lines = list(_iter_lines_gz(raw))
+        print("DEBUG _load_bytes: gz streamed, lines={}".format(len(cif_lines)))
+        return cif_lines, None
+
+    # zip archive
     if zipfile.is_zipfile(io.BytesIO(raw)):
+        print("DEBUG _load_bytes: zip archive")
         cif, msn = None, None
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
             for zname in zf.namelist():
                 zu = zname.upper()
                 if zu.endswith(".MCA") and cif is None:
-                    cif = _decode(zf.read(zname))
+                    print("DEBUG _load_bytes: reading MCA from zip")
+                    with zf.open(zname) as mf:
+                        cif = [line.rstrip("\n") for line in
+                               io.TextIOWrapper(mf, encoding="latin-1", errors="replace")]
                 elif zu.endswith(".MSN") and msn is None:
+                    print("DEBUG _load_bytes: reading MSN from zip")
                     msn = _decode(zf.read(zname))
         return cif, msn
+
+    # plain text
+    print("DEBUG _load_bytes: plain text")
     lines = _decode(raw)
     if name.endswith(".MSN"):
         return None, lines
@@ -347,12 +369,6 @@ if not file_map:
 # Parse
 print("DEBUG: starting parse, passenger_only={}, stp={}".format(passenger_only, stp_options))
 try:
-    print("DEBUG: calling _load_bytes")
-    for fname, raw in file_map.items():
-        cl, ml = _load_bytes(raw, fname)
-        print("DEBUG: _load_bytes done, cif_lines={}, msn_lines={}".format(
-            len(cl) if cl else None,
-            len(ml) if ml else None))
     print("DEBUG: calling run_parse")
     df_full = run_parse(
         file_map,
