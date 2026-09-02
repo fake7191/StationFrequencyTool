@@ -8,6 +8,7 @@ import io
 import zipfile
 from collections import defaultdict
 from datetime import date
+import traceback
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -467,35 +468,54 @@ stops are counted by default.
     st.stop()
 
 # ---------------------------------------------------------------------------
+# Debug panel
+# ---------------------------------------------------------------------------
+
+with st.expander("Debug info (expand if app crashes)", expanded=False):
+    st.write(f"**Files received:** {list(file_map.keys())}")
+    for fname, raw in file_map.items():
+        st.write(f"- `{fname}`: {len(raw):,} bytes, first 4 bytes hex: `{raw[:4].hex()}`")
+    st.write(f"**passenger_only:** {passenger_only}")
+    st.write(f"**stp_options:** {stp_options}")
+
+# ---------------------------------------------------------------------------
 # Parse
 # ---------------------------------------------------------------------------
 
-with st.spinner("Parsing timetable… (30–60 s for a full CIF)"):
-    try:
-        df_full = run_parse(
-            file_map,
-            passenger_only,
-            tuple(sorted(stp_options)) if stp_options else ("P",),
-        )
-    except ValueError as e:
-        st.error(str(e))
-        st.stop()
+st.info("Parsing timetable... this takes 30-60 s for a full CIF.")
+
+try:
+    df_full = run_parse(
+        file_map,
+        passenger_only,
+        tuple(sorted(stp_options)) if stp_options else ("P",),
+    )
+    st.success(f"Parsed OK - {len(df_full):,} TIPLOCs found.")
+except Exception as e:
+    st.error(f"Parse failed: {type(e).__name__}: {e}")
+    st.code(traceback.format_exc())
+    st.stop()
 
 # ---------------------------------------------------------------------------
 # Apply filters
 # ---------------------------------------------------------------------------
 
-df = df_full.copy()
-if crs_only:
-    df = df[df["crs"].str.strip() != ""]
-if name_filter.strip():
-    q = name_filter.strip().upper()
-    df = df[
-        df["station_name"].str.upper().str.contains(q, na=False)
-        | df["crs"].str.upper().str.contains(q, na=False)
-        | df["tiploc"].str.upper().str.contains(q, na=False)
-    ]
-df = df.sort_values(sort_col, ascending=False).head(top_n).reset_index(drop=True)
+try:
+    df = df_full.copy()
+    if crs_only:
+        df = df[df["crs"].str.strip() != ""]
+    if name_filter.strip():
+        q = name_filter.strip().upper()
+        df = df[
+            df["station_name"].str.upper().str.contains(q, na=False)
+            | df["crs"].str.upper().str.contains(q, na=False)
+            | df["tiploc"].str.upper().str.contains(q, na=False)
+        ]
+    df = df.sort_values(sort_col, ascending=False).head(top_n).reset_index(drop=True)
+except Exception as e:
+    st.error(f"Filter failed: {type(e).__name__}: {e}")
+    st.code(traceback.format_exc())
+    st.stop()
 
 # ---------------------------------------------------------------------------
 # Metrics
