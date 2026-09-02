@@ -366,14 +366,51 @@ with st.sidebar:
                     if code == 401:
                         st.error("Authentication failed — check credentials.")
                     else:
-                        st.error(f"HTTP {code} error.")
+                        st.error(f"HTTP {code} error — Network Rail may be blocking cloud IPs. Use the download command below instead.")
                 except Exception as e:
-                    st.error(f"Download failed: {e}")
+                    st.error(f"Download failed: {e} — try the download command below.")
 
         if "nr_raw" in st.session_state:
             file_map[st.session_state["nr_fname"]] = st.session_state["nr_raw"]
             mb = len(st.session_state["nr_raw"]) / 1e6
             st.caption(f"CIF ready ({mb:.1f} MB).")
+
+        # --- Local download helper ---
+        with st.expander("Can't auto-download? Get a local download command"):
+            st.caption(
+                "Network Rail sometimes blocks cloud server IPs. "
+                "Run this command on your own machine, then upload the file below."
+            )
+            if nr_user and nr_pass:
+                curl_cmd = (
+                    f'curl -L -u "{nr_user}:{nr_pass}" \\\n'
+                    f'  "{NR_CIF_URL}" \\\n'
+                    f'  -o cif_latest.gz'
+                )
+                py_cmd = (
+                    f'python -c "\n'
+                    f'import requests\n'
+                    f'r = requests.get(\\"{NR_CIF_URL}\\", auth=(\\"{ nr_user }\\", \\"{ nr_pass }\\"), allow_redirects=True)\n'
+                    f'open(\\"cif_latest.gz\\", \\"wb\\").write(r.content)\n'
+                    f'print(f\\"Saved {{len(r.content)/1e6:.1f}} MB\\")"\n'
+                )
+                st.markdown("**curl (Mac / Linux / Windows with curl):**")
+                st.code(curl_cmd, language="bash")
+                st.markdown("**Python (any platform):**")
+                st.code(
+                    f"import requests\n"
+                    f'r = requests.get(\n'
+                    f'    "{NR_CIF_URL}",\n'
+                    f'    auth=("{nr_user}", "{nr_pass}"),\n'
+                    f'    allow_redirects=True,\n'
+                    f')\n'
+                    f'open("cif_latest.gz", "wb").write(r.content)\n'
+                    f'print(f"Saved {{len(r.content)/1e6:.1f}} MB")',
+                    language="python",
+                )
+                st.caption("Then upload `cif_latest.gz` using the Upload file option.")
+            else:
+                st.caption("Enter your credentials above to generate the command.")
 
     else:
         st.caption("Upload the TTIS zip, a Network Rail .gz, or a raw .MCA file.")
