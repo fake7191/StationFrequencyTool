@@ -1,7 +1,5 @@
 """
 UK Train Frequency Explorer — Streamlit app
-Parses Network Rail CIF timetable data and shows weekly call counts per station.
-
 Run with:  streamlit run app.py
 """
 
@@ -17,7 +15,7 @@ import requests
 import streamlit as st
 
 # ---------------------------------------------------------------------------
-# Page config
+# Page config  (must be first Streamlit call)
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
@@ -31,43 +29,31 @@ st.set_page_config(
 # Constants
 # ---------------------------------------------------------------------------
 
-DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
+DAYS       = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+DAY_LABELS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
 PASSENGER_STATUSES = {"P", "1", "5"}
-
 WEEKDAY_COLOUR = "#2a78d6"
 WEEKEND_COLOUR = "#eb6834"
 BAR_COLOURS = [WEEKDAY_COLOUR] * 5 + [WEEKEND_COLOUR] * 2
 
-# Network Rail CIF download endpoint
-# type=CIF_ALL_FULL_DAILY / day=toc-full  → full weekly extract (gzipped CIF)
 NR_CIF_URL = (
     "https://publicdatafeeds.networkrail.co.uk"
     "/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full"
 )
 
-
 # ---------------------------------------------------------------------------
 # Network Rail downloader
 # ---------------------------------------------------------------------------
 
-def fetch_nr_cif(username: str, password: str) -> bytes:
-    """
-    Download the full CIF from the Network Rail open data feed.
-    Returns raw bytes (gzip-compressed CIF).
-    Raises requests.HTTPError on auth failure or server error.
-    """
+def fetch_nr_cif(username, password):
     resp = requests.get(
         NR_CIF_URL,
         auth=(username, password),
         allow_redirects=True,
-        timeout=300,   # large file — allow 5 min
-        stream=False,
+        timeout=300,
     )
     resp.raise_for_status()
     return resp.content
-
 
 # ---------------------------------------------------------------------------
 # CIF parsing helpers
@@ -81,21 +67,16 @@ def _decode(raw):
 
 
 def _load_bytes(raw, filename=""):
-    """
-    Accept raw bytes that may be:
-      - a gzip-compressed CIF (.gz)
-      - a zip archive (containing .MCA + .MSN)
-      - a plain CIF / MSN text file
-    Returns (cif_lines, msn_lines).
-    """
+    """Unwrap gz / zip / plain text. Returns (cif_lines, msn_lines)."""
     cif_lines = None
     msn_lines = None
     name_upper = filename.upper()
 
-    # gzip → unwrap first
-    if name_upper.endswith(".GZ") or (raw[:2] == b"\x1f\x8b"):
+    # unwrap gzip
+    if name_upper.endswith(".GZ") or raw[:2] == b"\x1f\x8b":
         raw = gzip.decompress(raw)
-        name_upper = name_upper.removesuffix(".GZ")
+        if name_upper.endswith(".GZ"):
+            name_upper = name_upper[:-3]
 
     # zip archive
     if zipfile.is_zipfile(io.BytesIO(raw)):
@@ -108,15 +89,14 @@ def _load_bytes(raw, filename=""):
                     msn_lines = _decode(zf.read(zname))
         return cif_lines, msn_lines
 
-    # plain text — decide by extension
-    text_lines = _decode(raw)
+    # plain text
+    lines = _decode(raw)
     if name_upper.endswith(".MSN"):
-        return None, text_lines
-    # default: treat as CIF / MCA
-    return text_lines, None
+        return None, lines
+    return lines, None
 
 
-def _parse_yymmdd(s: str):
+def _parse_yymmdd(s):
     if not s or len(s) < 6 or not s.strip():
         return None
     try:
@@ -132,8 +112,8 @@ def _days_active(days_run):
     return {i for i, ch in enumerate(days_run[:7]) if ch == "1"}
 
 
-def _is_public_stop(activity: str) -> bool:
-    acts = {activity[i:i + 2].strip() for i in range(0, min(len(activity), 12), 2)}
+def _is_public_stop(activity):
+    acts = {activity[i:i+2].strip() for i in range(0, min(len(activity), 12), 2)}
     return not (acts >= {"-D", "-U"})
 
 
@@ -154,10 +134,10 @@ def parse_cif(lines, passenger_only=True, stp_include=None):
     if stp_include is None:
         stp_include = {"P", "O", "N"}
 
-    tiploc_map: dict = {}
-    schedules: list = []
+    tiploc_map = {}
+    schedules  = []
     current_bs = None
-    current_stops: list = []
+    current_stops = []
     in_schedule = False
 
     for raw in lines:
@@ -179,10 +159,9 @@ def parse_cif(lines, passenger_only=True, stp_include=None):
             if in_schedule and current_bs and current_stops:
                 current_bs["stops"] = current_stops
                 schedules.append(current_bs)
-            in_schedule = False
+            in_schedule   = False
             current_stops = []
-            current_bs = None
-
+            current_bs    = None
             if len(line) < 80 or line[2] == "D":
                 continue
             stp    = line[79]
@@ -206,10 +185,10 @@ def parse_cif(lines, passenger_only=True, stp_include=None):
                 current_stops.append(tiploc)
 
         elif rt == "LI" and in_schedule:
-            tiploc  = line[2:9].strip()
-            pub_arr = line[25:29].strip() if len(line) >= 29 else ""
-            pub_dep = line[29:33].strip() if len(line) >= 33 else ""
-            activity = line[42:54] if len(line) >= 54 else ""
+            tiploc   = line[2:9].strip()
+            pub_arr  = line[25:29].strip() if len(line) >= 29 else ""
+            pub_dep  = line[29:33].strip() if len(line) >= 33 else ""
+            activity = line[42:54]         if len(line) >= 54 else ""
             if (pub_arr or pub_dep) and _is_public_stop(activity):
                 current_stops.append(tiploc)
 
@@ -221,9 +200,9 @@ def parse_cif(lines, passenger_only=True, stp_include=None):
             if current_stops:
                 current_bs["stops"] = current_stops
                 schedules.append(current_bs)
-            in_schedule = False
+            in_schedule   = False
             current_stops = []
-            current_bs = None
+            current_bs    = None
 
         elif rt == "ZZ":
             if in_schedule and current_bs and current_stops:
@@ -286,26 +265,22 @@ def build_dataframe(counts, tiploc_map):
 
 
 # ---------------------------------------------------------------------------
-# Cached parse (keyed on raw bytes + options)
+# Cached parse
 # ---------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
 def run_parse(file_map, passenger_only, stp_tuple):
     cif_lines = None
     msn_lines = None
-
     for fname, raw in file_map.items():
         cl, ml = _load_bytes(raw, fname)
         if cl is not None and cif_lines is None:
             cif_lines = cl
         if ml is not None and msn_lines is None:
             msn_lines = ml
-
     if cif_lines is None:
         raise ValueError("No CIF data found. Expected a .gz, .zip (.MCA inside), or .MCA file.")
-
     schedules, tiploc_map = parse_cif(cif_lines, passenger_only, set(stp_tuple))
-
     if msn_lines:
         for tiploc, info in parse_msn(msn_lines).items():
             if tiploc not in tiploc_map:
@@ -313,13 +288,12 @@ def run_parse(file_map, passenger_only, stp_tuple):
             else:
                 if info["name"]: tiploc_map[tiploc]["name"] = info["name"]
                 if info["crs"]:  tiploc_map[tiploc]["crs"]  = info["crs"]
-
     schedules = apply_stp(schedules)
     return build_dataframe(count_calls(schedules), tiploc_map)
 
 
 # ---------------------------------------------------------------------------
-# Chart
+# Chart helper
 # ---------------------------------------------------------------------------
 
 def make_bar_chart(row, label):
@@ -342,105 +316,103 @@ def make_bar_chart(row, label):
 
 
 # ---------------------------------------------------------------------------
-# Sidebar
+# Sidebar — completely flat layout, no tabs, no toggle, no icon= args
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
     st.title("🚆 Train Frequency Explorer")
+    st.divider()
 
-    # ---- Data source tabs ----
-    src_tab, opt_tab, filter_tab = st.tabs(["📥 Data", "⚙️ Options", "🔍 Filter"])
+    # ---- Credentials from secrets (silent) ----
+    try:
+        _nr_user = st.secrets["network_rail"]["username"]
+        _nr_pass = st.secrets["network_rail"]["password"]
+    except (KeyError, FileNotFoundError):
+        _nr_user = ""
+        _nr_pass = ""
 
-    with src_tab:
-        st.markdown("**Source**")
-        source = st.radio(
-            "Get data from",
-            ["Network Rail (auto-download)", "Upload file"],
-            label_visibility="collapsed",
-        )
+    # ---- Data source ----
+    st.subheader("Data source")
+    source = st.radio(
+        "source",
+        ["Network Rail (auto-download)", "Upload file"],
+        label_visibility="collapsed",
+    )
 
-        file_map = {}   # fname → bytes, populated by whichever source is chosen
+    file_map = {}
 
-        if source == "Network Rail (auto-download)":
-            st.caption(
-                "Downloads the full CIF directly from "
-                "[publicdatafeeds.networkrail.co.uk](https://publicdatafeeds.networkrail.co.uk). "
-                "Use your existing Network Rail open data account."
-            )
-
-            # Pull from secrets.toml if present, otherwise show input fields
-            try:
-                _user_from_secret = st.secrets["network_rail"]["username"]
-                _pass_from_secret = st.secrets["network_rail"]["password"]
-            except (KeyError, FileNotFoundError):
-                _user_from_secret = ""
-                _pass_from_secret = ""
-
-            if _user_from_secret and _pass_from_secret:
-                nr_user = _user_from_secret
-                nr_pass = _pass_from_secret
-                st.success("Credentials loaded from secrets.toml", icon="🔑")
-            else:
-                nr_user = st.text_input("Username (email)", key="nr_user")
-                nr_pass = st.text_input("Password", type="password", key="nr_pass")
-
-            do_download = st.button("Download & parse", type="primary",
-                                    disabled=not (nr_user and nr_pass))
-
-            if do_download:
-                with st.spinner("Downloading CIF from Network Rail (~50 MB)…"):
-                    try:
-                        raw = fetch_nr_cif(nr_user, nr_pass)
-                        st.session_state["nr_raw"] = raw
-                        st.session_state["nr_fname"] = "CIF_ALL_FULL_DAILY.gz"
-                        st.success(f"Downloaded {len(raw)/1e6:.1f} MB")
-                    except requests.HTTPError as e:
-                        if e.response is not None and e.response.status_code == 401:
-                            st.error("Authentication failed — check your username and password.")
-                        else:
-                            st.error(f"Download failed: {e}")
-                    except Exception as e:
-                        st.error(f"Download failed: {e}")
-
-            if "nr_raw" in st.session_state:
-                file_map[st.session_state["nr_fname"]] = st.session_state["nr_raw"]
-                st.info(f"Using downloaded CIF ({len(st.session_state['nr_raw'])/1e6:.1f} MB)", icon="✅")
-
+    if source == "Network Rail (auto-download)":
+        if _nr_user and _nr_pass:
+            st.caption("Credentials loaded from secrets.toml.")
+            nr_user = _nr_user
+            nr_pass = _nr_pass
         else:
             st.caption(
-                "Upload the TTIS zip from NRDP, the Network Rail .gz, "
-                "or a raw .MCA file. A separate .MSN can be added too."
+                "Enter your [Network Rail open data](https://publicdatafeeds.networkrail.co.uk) credentials."
             )
-            uploaded = st.file_uploader(
-                "CIF file(s)",
-                type=["zip", "gz", "mca", "cif", "msn"],
-                accept_multiple_files=True,
-            )
-            if uploaded:
-                for f in uploaded:
-                    file_map[f.name] = f.read()
+            nr_user = st.text_input("Username (email)")
+            nr_pass = st.text_input("Password", type="password")
 
-    with opt_tab:
-        st.markdown("**Parse options**")
-        passenger_only = st.toggle("Passenger services only", value=True,
-            help="Status P/1/5 only. Off = include freight and ECS.")
-        stp_options = st.multiselect(
-            "STP indicators",
-            options=["P", "O", "N"],
-            default=["P", "O", "N"],
-            help="P=Permanent, O=Overlay, N=New STP. Cancellations (C) never counted.",
+        if st.button("Download & parse", type="primary",
+                     disabled=not (nr_user and nr_pass)):
+            with st.spinner("Downloading from Network Rail (~50 MB)…"):
+                try:
+                    raw = fetch_nr_cif(nr_user, nr_pass)
+                    st.session_state["nr_raw"]   = raw
+                    st.session_state["nr_fname"] = "CIF_ALL_FULL_DAILY.gz"
+                    st.success(f"Downloaded {len(raw)/1e6:.1f} MB.")
+                except requests.HTTPError as e:
+                    code = e.response.status_code if e.response is not None else "?"
+                    if code == 401:
+                        st.error("Authentication failed — check credentials.")
+                    else:
+                        st.error(f"HTTP {code} error.")
+                except Exception as e:
+                    st.error(f"Download failed: {e}")
+
+        if "nr_raw" in st.session_state:
+            file_map[st.session_state["nr_fname"]] = st.session_state["nr_raw"]
+            mb = len(st.session_state["nr_raw"]) / 1e6
+            st.caption(f"CIF ready ({mb:.1f} MB).")
+
+    else:
+        st.caption("Upload the TTIS zip, a Network Rail .gz, or a raw .MCA file.")
+        uploaded = st.file_uploader(
+            "CIF file(s)",
+            type=["zip", "gz", "mca", "cif", "msn"],
+            accept_multiple_files=True,
         )
+        if uploaded:
+            for f in uploaded:
+                file_map[f.name] = f.read()
 
-    with filter_tab:
-        st.markdown("**Filter & sort**")
-        crs_only    = st.toggle("Stations with CRS code only", value=True,
-            help="Hides junctions, depots and other non-passenger TIPLOCs.")
-        name_filter = st.text_input("Search name / CRS / TIPLOC",
-                                    placeholder="e.g. Edinburgh, EDB")
-        sort_col    = st.selectbox("Sort by",
-                                   ["weekly_total"] + DAYS,
-                                   format_func=lambda c: c.replace("_"," ").title())
-        top_n       = st.slider("Show top N", 10, 500, 100, step=10)
+    st.divider()
+
+    # ---- Parse options ----
+    st.subheader("Parse options")
+    passenger_only = st.checkbox("Passenger services only", value=True,
+        help="Status P/1/5. Uncheck to include freight and ECS.")
+    stp_options = st.multiselect(
+        "STP indicators to include",
+        options=["P", "O", "N"],
+        default=["P", "O", "N"],
+        help="P=Permanent, O=Overlay, N=New STP. Cancellations never counted.",
+    )
+
+    st.divider()
+
+    # ---- Filters ----
+    st.subheader("Filter & sort")
+    crs_only    = st.checkbox("Stations with CRS code only", value=True,
+        help="Hides junctions, depots and non-passenger TIPLOCs.")
+    name_filter = st.text_input("Search name / CRS / TIPLOC",
+                                placeholder="e.g. Edinburgh, EDB")
+    sort_col    = st.selectbox(
+        "Sort by",
+        ["weekly_total"] + DAYS,
+        format_func=lambda c: c.replace("_", " ").title(),
+    )
+    top_n = st.slider("Show top N stations", 10, 500, 100, step=10)
 
 
 # ---------------------------------------------------------------------------
@@ -451,10 +423,8 @@ if not file_map:
     st.markdown("## UK Train Frequency Explorer")
     st.info(
         "👈 Choose a data source in the sidebar to get started.\n\n"
-        "**Auto-download** uses your [Network Rail open data](https://publicdatafeeds.networkrail.co.uk) "
-        "credentials to fetch the latest full CIF automatically.\n\n"
-        "**Upload** accepts the weekly TTIS zip from NRDP, a Network Rail `.gz`, or a raw `.MCA` file.",
-        icon="🚉",
+        "**Auto-download** fetches the latest full CIF from Network Rail automatically.\n\n"
+        "**Upload** accepts the weekly TTIS zip from NRDP, a Network Rail `.gz`, or a raw `.MCA` file."
     )
     with st.expander("What does this app do?"):
         st.markdown("""
@@ -467,9 +437,8 @@ across all 2,500+ UK stations in a single pass, with no API rate limits.
 | Mon – Sun | Scheduled services calling that day |
 | Weekly total | Sum across all 7 days |
 
-STP cancellations suppress their permanent counterparts; overlays and new STP
-services are counted independently. Only public passenger stops are counted
-by default (origin, calling point, or terminus with a published time).
+STP cancellations suppress their permanent counterparts. Only public passenger
+stops are counted by default.
         """)
     st.stop()
 
@@ -477,7 +446,7 @@ by default (origin, calling point, or terminus with a published time).
 # Parse
 # ---------------------------------------------------------------------------
 
-with st.spinner("Parsing timetable… 30–60 s for a full CIF"):
+with st.spinner("Parsing timetable… (30–60 s for a full CIF)"):
     try:
         df_full = run_parse(
             file_map,
@@ -513,20 +482,20 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("Stations shown",        f"{len(df):,}")
 c2.metric("Total stations parsed", f"{len(df_full[df_full['crs'] != '']):,}")
 c3.metric("Busiest station",
-          df.iloc[0]["station_name"] or df.iloc[0]["tiploc"] if len(df) else "—")
+          (df.iloc[0]["station_name"] or df.iloc[0]["tiploc"]) if len(df) else "—")
 c4.metric("Busiest weekly total",
           f"{int(df.iloc[0]['weekly_total']):,}" if len(df) else "—")
 
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Table + station detail
+# Table  +  station detail
 # ---------------------------------------------------------------------------
 
 col_left, col_right = st.columns([3, 2], gap="large")
 
 with col_left:
-    st.subheader(f"Top {min(top_n, len(df))} stations — sorted by {sort_col.replace('_',' ')}")
+    st.subheader(f"Top {min(top_n, len(df))} — sorted by {sort_col.replace('_',' ')}")
 
     display_cols = ["crs", "station_name"] + DAYS + ["weekly_total"]
     rename_map   = {"crs": "CRS", "station_name": "Station", "weekly_total": "Weekly",
@@ -534,20 +503,15 @@ with col_left:
 
     styled = (
         df[display_cols].rename(columns=rename_map).style
-        .background_gradient(subset=["Mon","Tue","Wed","Thu","Fri"],
-                             cmap="Blues", vmin=0)
-        .background_gradient(subset=["Sat","Sun"],
-                             cmap="Oranges", vmin=0)
-        .background_gradient(subset=["Weekly"],
-                             cmap="Purples", vmin=0)
-        .format("{:,.0f}",
-                subset=["Mon","Tue","Wed","Thu","Fri","Sat","Sun","Weekly"])
+        .background_gradient(subset=["Mon","Tue","Wed","Thu","Fri"], cmap="Blues",   vmin=0)
+        .background_gradient(subset=["Sat","Sun"],                   cmap="Oranges", vmin=0)
+        .background_gradient(subset=["Weekly"],                      cmap="Purples", vmin=0)
+        .format("{:,.0f}", subset=["Mon","Tue","Wed","Thu","Fri","Sat","Sun","Weekly"])
     )
     st.dataframe(styled, use_container_width=True, height=520)
 
     csv_bytes = df_full.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇ Download full CSV", csv_bytes,
-                       "station_calls.csv", "text/csv")
+    st.download_button("Download full CSV", csv_bytes, "station_calls.csv", "text/csv")
 
 with col_right:
     st.subheader("Station detail")
@@ -559,9 +523,9 @@ with col_right:
             axis=1,
         ).tolist()
         selected_label = st.selectbox("Select a station", options, index=0)
-        row = df.iloc[options.index(selected_label)]
-
+        row   = df.iloc[options.index(selected_label)]
         label = f"{row['station_name'] or row['tiploc']}  ({row['crs'] or row['tiploc']})"
+
         st.plotly_chart(make_bar_chart(row, label), use_container_width=True)
 
         day_df = pd.DataFrame({
@@ -569,8 +533,7 @@ with col_right:
             "Calls": [int(row[d]) for d in DAYS],
             "Type":  ["Weekday"] * 5 + ["Weekend"] * 2,
         })
-        max_calls = day_df["Calls"].max() or 1
-        day_df["% of peak"] = (day_df["Calls"] / max_calls * 100).round(1)
+        day_df["% of peak"] = (day_df["Calls"] / (day_df["Calls"].max() or 1) * 100).round(1)
         st.dataframe(
             day_df.style.format({"Calls": "{:,}", "% of peak": "{:.1f}%"}),
             use_container_width=True, hide_index=True,
@@ -601,8 +564,7 @@ if len(top10) > 0:
     fig.update_layout(
         barmode="group",
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="right", x=1),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         yaxis=dict(title="Train calls", gridcolor="rgba(128,128,128,0.15)"),
         margin=dict(t=32, b=20, l=20, r=20), height=380,
     )
