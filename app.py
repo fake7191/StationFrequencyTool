@@ -4,6 +4,7 @@ Run: streamlit run app.py
 """
 
 import gzip
+import hashlib
 import io
 import traceback
 import zipfile
@@ -42,47 +43,46 @@ def _decode(raw):
     except UnicodeDecodeError:
         return raw.decode("latin-1").splitlines()
 
-def _iter_lines_gz(raw):
-    """Stream-decode a gzip bytes object line by line — avoids holding
-    the full decompressed content in memory at once."""
-    with gzip.open(io.BytesIO(raw), "rt", encoding="latin-1", errors="replace") as f:
-        for line in f:
-            yield line.rstrip("\n")
-
-def _load_bytes(raw, filename=""):
+def _open_cif_stream(raw, filename=""):
+    """
+    Return (cif_iterator, msn_lines_or_None).
+    The cif_iterator yields one line at a time without ever holding
+    the full decompressed content in memory.
+    """
     name = filename.upper()
-    is_gz = name.endswith(".GZ") or raw[:2] == b"\x1f\x8b"
 
-    # gzip — stream decode, never decompress fully into RAM
-    if is_gz:
-        print("DEBUG _load_bytes: streaming gzip")
-        cif_lines = list(_iter_lines_gz(raw))
-        print("DEBUG _load_bytes: gz streamed, lines={}".format(len(cif_lines)))
-        return cif_lines, None
+    # gzip — stream directly, zero full-decompression cost
+    if name.endswith(".GZ") or raw[:2] == b"\x1f\x8b":
+        print("DEBUG: opening as gzip stream")
+        def _gz_iter():
+            with gzip.open(io.BytesIO(raw), "rt",
+                           encoding="latin-1", errors="replace") as fh:
+                for line in fh:
+                    yield line.rstrip("\n\r")
+        return _gz_iter(), None
 
-    # zip archive
+    # zip archive — MSN can be small so we decode it fully; MCA is streamed
     if zipfile.is_zipfile(io.BytesIO(raw)):
-        print("DEBUG _load_bytes: zip archive")
-        cif, msn = None, None
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            for zname in zf.namelist():
-                zu = zname.upper()
-                if zu.endswith(".MCA") and cif is None:
-                    print("DEBUG _load_bytes: reading MCA from zip")
-                    with zf.open(zname) as mf:
-                        cif = [line.rstrip("\n") for line in
-                               io.TextIOWrapper(mf, encoding="latin-1", errors="replace")]
-                elif zu.endswith(".MSN") and msn is None:
-                    print("DEBUG _load_bytes: reading MSN from zip")
-                    msn = _decode(zf.read(zname))
-        return cif, msn
+        print("DEBUG: opening as zip")
+        cif_iter = None
+        msn_lines = None
+        zf = zipfile.ZipFile(io.BytesIO(raw))  # kept open; closed after parse
+        for zname in zf.namelist():
+            zu = zname.upper()
+            if zu.endswith(".MCA") and cif_iter is None:
+                mf = zf.open(zname)
+                wrapper = io.TextIOWrapper(mf, encoding="latin-1", errors="replace")
+                cif_iter = (line.rstrip("\n\r") for line in wrapper)
+            elif zu.endswith(".MSN") and msn_lines is None:
+                msn_lines = _decode(zf.read(zname))
+        return cif_iter, msn_lines
 
-    # plain text
-    print("DEBUG _load_bytes: plain text")
+    # plain text already in memory
+    print("DEBUG: opening as plain text")
     lines = _decode(raw)
     if name.endswith(".MSN"):
-        return None, lines
-    return lines, None
+        return iter([]), lines
+    return iter(lines), None
 
 def _parse_date(s):
     if not s or len(s) < 6 or not s.strip():
@@ -112,12 +112,12 @@ def parse_msn(lines):
             out[t] = {"name": line[1:27].strip(), "crs": line[36:39].strip()}
     return out
 
-def parse_cif(lines, passenger_only=True, stp_include=None):
+def parse_cif(line_iter, passenger_only=True, stp_include=None):
     if stp_include is None:
         stp_include = {"P","O","N"}
     tiploc_map, schedules = {}, []
     cur, stops, active = None, [], False
-    for raw in lines:
+    for raw in line_iter:
         line = raw.rstrip("\r\n")
         if len(line) < 2:
             continue
@@ -208,25 +208,39 @@ def build_df(counts, tiploc_map):
                      "weekly_total": sum(dc)})
     return pd.DataFrame(rows).sort_values("weekly_total", ascending=False).reset_index(drop=True)
 
+def _hash_file_map(file_map):
+    """Hash file contents so we can cache without storing raw bytes."""
+    h = hashlib.md5()
+    for fname in sorted(file_map.keys()):
+        h.update(fname.encode())
+        h.update(file_map[fname][:65536])   # first 64KB is enough to detect changes
+        h.update(str(len(file_map[fname])).encode())
+    return h.hexdigest()
+
 @st.cache_data(show_spinner=False)
-def run_parse(file_map, passenger_only, stp_tuple):
-    print("DEBUG run_parse: start, files={}".format(list(file_map.keys())))
-    cif_lines, msn_lines = None, None
+def run_parse(file_hash, file_map, passenger_only, stp_tuple):
+    """file_hash is only used as the cache key; file_map holds the data."""
+    print("DEBUG run_parse: start hash={} files={}".format(
+        file_hash, list(file_map.keys())))
+    cif_iter = None
+    msn_lines = None
+
     for fname, raw in file_map.items():
-        print("DEBUG run_parse: _load_bytes for {}".format(fname))
-        cl, ml = _load_bytes(raw, fname)
-        print("DEBUG run_parse: got cif={} msn={}".format(
-            len(cl) if cl else None, len(ml) if ml else None))
-        if cl is not None and cif_lines is None:
-            cif_lines = cl
+        print("DEBUG run_parse: opening stream for {}".format(fname))
+        ci, ml = _open_cif_stream(raw, fname)
+        if ci is not None and cif_iter is None:
+            cif_iter = ci
         if ml is not None and msn_lines is None:
             msn_lines = ml
-    if cif_lines is None:
+
+    if cif_iter is None:
         raise ValueError("No CIF data found in uploaded file.")
-    print("DEBUG run_parse: parse_cif start, lines={}".format(len(cif_lines)))
-    schedules, tiploc_map = parse_cif(cif_lines, passenger_only, set(stp_tuple))
+
+    print("DEBUG run_parse: parse_cif streaming start")
+    schedules, tiploc_map = parse_cif(cif_iter, passenger_only, set(stp_tuple))
     print("DEBUG run_parse: parse_cif done, schedules={} tiplocs={}".format(
         len(schedules), len(tiploc_map)))
+
     if msn_lines:
         print("DEBUG run_parse: merging MSN")
         for t, info in parse_msn(msn_lines).items():
@@ -235,6 +249,7 @@ def run_parse(file_map, passenger_only, stp_tuple):
             else:
                 if info["name"]: tiploc_map[t]["name"] = info["name"]
                 if info["crs"]:  tiploc_map[t]["crs"]  = info["crs"]
+
     print("DEBUG run_parse: apply_stp + count_calls + build_df")
     result = build_df(count_calls(apply_stp(schedules)), tiploc_map)
     print("DEBUG run_parse: done, rows={}".format(len(result)))
@@ -371,6 +386,7 @@ print("DEBUG: starting parse, passenger_only={}, stp={}".format(passenger_only, 
 try:
     print("DEBUG: calling run_parse")
     df_full = run_parse(
+        _hash_file_map(file_map),
         file_map,
         passenger_only,
         tuple(sorted(stp_options)) if stp_options else ("P",),
