@@ -298,15 +298,23 @@ def build_df(counts, tiploc_map, station_tiplocs=None):
             continue
         info = tiploc_map.get(t, {"name":"","crs":""})
         rows.append({"tiploc": t,
-                     "crs": info.get("crs",""),
-                     "station_name": info.get("name",""),
+                     "crs": info.get("crs","") or "",
+                     "station_name": info.get("name","") or "",
                      **{DAYS[i]: dc[i] for i in range(7)},
                      "weekly_total": sum(dc)})
     if not rows:
         cols = ["tiploc","crs","station_name"] + DAYS + ["weekly_total"]
         return pd.DataFrame(columns=cols)
     df = pd.DataFrame(rows)
-    df = merge_by_crs(df)
+
+    try:
+        df = merge_by_crs(df)
+    except Exception as e:
+        print("DEBUG: merge_by_crs failed, falling back to unmerged rows: {}".format(
+            traceback.format_exc()))
+        # Fail safe: return the unmerged data rather than crash the app.
+        # Duplicate CRS rows may appear, but the app stays usable.
+
     return df.sort_values("weekly_total", ascending=False).reset_index(drop=True)
 
 
@@ -317,10 +325,17 @@ def merge_by_crs(df):
     code. Merge rows that share a non-blank CRS so each station appears once,
     summing the day counts across all its TIPLOCs.
     Rows with no CRS are left as-is (one row per TIPLOC).
-    Written without groupby().apply() to stay compatible across pandas
-    versions, whose group-column-exclusion behaviour changed between
-    pandas 2.x and 3.x.
+    Written without groupby().apply() on a full DataFrame to stay compatible
+    across pandas versions, whose group-column-exclusion behaviour changed
+    between pandas 2.x and 3.x.
     """
+    df = df.copy()
+    # Defensive casting — guard against NaN or non-string values reaching
+    # .str accessor calls, which raise and would otherwise crash the app.
+    df["crs"]          = df["crs"].fillna("").astype(str)
+    df["tiploc"]       = df["tiploc"].fillna("").astype(str)
+    df["station_name"] = df["station_name"].fillna("").astype(str)
+
     has_crs = df["crs"].str.strip() != ""
     with_crs    = df[has_crs].copy()
     without_crs = df[~has_crs].copy()
@@ -335,17 +350,17 @@ def merge_by_crs(df):
     # For tiploc: join all TIPLOCs sharing a CRS
     tiplocs = (
         with_crs.groupby("crs")["tiploc"]
-        .apply(lambda s: "+".join(sorted(s)))
+        .apply(lambda s: "+".join(sorted(str(x) for x in s if x)))
         .reset_index()
-        .rename(columns={"tiploc": "tiploc"})
     )
 
     # For station_name: pick the longest non-empty name per CRS
     def _longest_name(s):
-        s = s.fillna("")
-        if (s.str.len() == 0).all():
+        s = s.fillna("").astype(str)
+        lengths = s.str.len()
+        if lengths.max() == 0:
             return ""
-        return s.loc[s.str.len().idxmax()]
+        return s.loc[lengths.idxmax()]
 
     names = (
         with_crs.groupby("crs")["station_name"]
@@ -664,7 +679,7 @@ if not file_map:
     st.stop()
 
 # Parse — use session_state as cache (avoids st.cache_data suppressing stdout)
-_cache_key = "parsed_v7_{}_{}_{}_{}".format(
+_cache_key = "parsed_v8_{}_{}_{}_{}".format(
     _hash_file_map(file_map),
     passenger_only,
     "_".join(sorted(stp_options)) if stp_options else "P",
