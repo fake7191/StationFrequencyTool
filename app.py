@@ -28,10 +28,13 @@ DAY_LABELS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
 PASSENGER_STATUSES = {"P","1","5"}
 BAR_COLOURS = ["#2a78d6"]*5 + ["#eb6834"]*2
 
-# Path to the bundled station reference file (committed to the repo)
+# Path to the bundled station reference files (committed to the repo)
 import os as _os
 _HERE = _os.path.dirname(_os.path.abspath(__file__))
 STATIONS_XML_PATH = _os.path.join(_HERE, "StationsRefData.xml")
+ORR_STATIONS_XLSX_PATH = _os.path.join(
+    _HERE, "NATIONAL_RAIL_STATION_LOG_UPDATED_WITH_USAGE.xlsx"
+)
 
 NR_URL = (
     "https://publicdatafeeds.networkrail.co.uk"
@@ -145,6 +148,34 @@ def parse_stations_xml(raw):
             names[tiploc] = {"name": name, "crs": crs}
     print("DEBUG parse_stations_xml: {} valid station TIPLOCs".format(len(valid)))
     return valid, names
+
+
+def parse_orr_station_list(path_or_bytes):
+    """
+    Parse the ORR "NATIONAL_RAIL_STATION_LOG" xlsx (Master sheet, column A
+    = station name). Returns a set of normalised station names for
+    name-based filtering — an independent, authoritative check on top of
+    the TIPLOC-based XML filter.
+    Normalisation: uppercase + collapsed whitespace, so minor formatting
+    differences between sources don't cause false negatives.
+    """
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(path_or_bytes, read_only=True, data_only=True)
+        ws = wb["Master"]
+        names = set()
+        for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
+            if row[0]:
+                names.add(_normalise_name(row[0]))
+        print("DEBUG parse_orr_station_list: {} station names loaded".format(len(names)))
+        return names
+    except Exception as e:
+        print("DEBUG parse_orr_station_list: failed: {}".format(e))
+        return set()
+
+
+def _normalise_name(name):
+    return " ".join(str(name).strip().upper().split())
 
 
 def parse_cif(line_iter, passenger_only=True, stp_include=None):
@@ -554,6 +585,15 @@ try:
 except Exception as _e:
     print("Could not load bundled StationsRefData.xml: {}".format(_e))
 
+# Load bundled ORR station usage list if present in repo
+_bundled_orr_names = None
+try:
+    if _os.path.exists(ORR_STATIONS_XLSX_PATH):
+        _bundled_orr_names = parse_orr_station_list(ORR_STATIONS_XLSX_PATH)
+        print("Loaded {} station names from bundled ORR list".format(len(_bundled_orr_names)))
+except Exception as _e:
+    print("Could not load bundled ORR station list: {}".format(_e))
+
 # Read secrets safely — must be the very first thing that touches st.secrets
 try:
     _secret_user = st.secrets["network_rail"]["username"]
@@ -567,6 +607,7 @@ passenger_only = True
 stp_options    = ["P","O","N"]
 crs_only       = True
 xml_filter     = True
+orr_filter     = True
 jn_filter      = True
 name_filter    = ""
 sort_col       = "weekly_total"
@@ -650,6 +691,10 @@ with st.sidebar:
         help="Hides entries with no 3-letter CRS code (junctions, depots etc.)")
     xml_filter  = st.checkbox("Station reference filter", value=True,
         help="Only show TIPLOCs in StationsRefData.xml — removes non-passenger locations definitively.")
+    orr_filter  = st.checkbox("ORR station list filter", value=True,
+        help="Only show stations whose name appears in the ORR official "
+             "station usage list — an independent authoritative check.",
+        disabled=_bundled_orr_names is None)
     jn_filter   = st.checkbox("Exclude junction / non-station names", value=True,
         help="Hides names containing Jn, Junction, Jct, Sidings, Depot, Loop, CS, TMD etc.")
     name_filter = st.text_input("Search name / CRS", placeholder="e.g. Edinburgh")
@@ -754,6 +799,11 @@ try:
                           for part in str(t).split("+"))
         )]
         print("DEBUG: xml filter done, rows={}".format(len(df)))
+    if orr_filter and _bundled_orr_names:
+        df = df[df["station_name"].apply(
+            lambda n: _normalise_name(n) in _bundled_orr_names
+        )]
+        print("DEBUG: orr filter done, rows={}".format(len(df)))
     if jn_filter:
         df = df[~df["station_name"].str.contains(_JN_PATTERN, regex=True, na=False)]
         print("DEBUG: jn filter done, rows={}".format(len(df)))
