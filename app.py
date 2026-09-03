@@ -590,15 +590,21 @@ with st.sidebar:
 
         ready = bool(_u and _p)
 
+        # In-progress guard prevents a second click while a fetch is running
+        _fetching = st.session_state.get("cif_fetch_in_progress", False)
+
         if "cif_fetched_v2" in st.session_state:
             st.success("CIF ready ({:.1f} MB).".format(
-                st.session_state["cif_fetched_mb_v2"]))
+                st.session_state.get("cif_fetched_mb_v2", 0)))
             file_map["CIF_ALL_FULL_DAILY.gz"] = st.session_state["cif_fetched_v2"]
-            if st.button("Fetch fresh copy"):
-                del st.session_state["cif_fetched_v2"]
-                del st.session_state["cif_fetched_mb_v2"]
+            if st.button("Fetch fresh copy", disabled=_fetching):
+                st.session_state.pop("cif_fetched_v2", None)
+                st.session_state.pop("cif_fetched_mb_v2", None)
+                st.rerun()
         else:
-            if st.button("Fetch & parse CIF", disabled=not ready, type="primary"):
+            if st.button("Fetch & parse CIF",
+                         disabled=not ready or _fetching, type="primary"):
+                st.session_state["cif_fetch_in_progress"] = True
                 with st.spinner("Downloading from Network Rail (~50 MB)..."):
                     try:
                         resp = requests.get(NR_URL, auth=(_u, _p),
@@ -611,6 +617,8 @@ with st.sidebar:
                         st.success("Fetched {:.1f} MB.".format(len(raw) / 1e6))
                     except Exception as ex:
                         st.error("Fetch failed: {}".format(ex))
+                    finally:
+                        st.session_state["cif_fetch_in_progress"] = False
 
         xml_up = st.file_uploader(
             "Optional: upload StationsRefData.xml to filter to passenger stations",
@@ -739,7 +747,12 @@ try:
         df = df[df["crs"].str.strip() != ""]
         print("DEBUG: crs filter done, rows={}".format(len(df)))
     if xml_filter and _bundled_station_tiplocs:
-        df = df[df["tiploc"].isin(_bundled_station_tiplocs)]
+        # tiploc may be a merged "TIPLOC1+TIPLOC2" string (see merge_by_crs) —
+        # match if ANY of the constituent TIPLOCs is a known station.
+        df = df[df["tiploc"].apply(
+            lambda t: any(part in _bundled_station_tiplocs
+                          for part in str(t).split("+"))
+        )]
         print("DEBUG: xml filter done, rows={}".format(len(df)))
     if jn_filter:
         df = df[~df["station_name"].str.contains(_JN_PATTERN, regex=True, na=False)]
