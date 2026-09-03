@@ -131,9 +131,12 @@ def parse_cif(line_iter, passenger_only=True, stp_include=None):
             if active and cur and stops:
                 cur["stops"] = stops; schedules.append(cur)
             cur, stops, active = None, [], False
-            if len(line) < 80 or line[2] == "D":
+            if len(line) < 30 or line[2] == "D":
                 continue
-            stp, status = line[79], line[29]
+            # STP indicator is at pos 79 on a full 80-char line
+            # NR CIF lines can occasionally be shorter — default to P
+            stp    = line[79].strip() if len(line) >= 80 else "P"
+            status = line[29].strip()
             if stp not in stp_include:
                 continue
             if passenger_only and status not in PASSENGER_STATUSES:
@@ -206,6 +209,10 @@ def build_df(counts, tiploc_map):
                      "station_name": info.get("name",""),
                      **{DAYS[i]: dc[i] for i in range(7)},
                      "weekly_total": sum(dc)})
+    if not rows:
+        # Return empty DataFrame with correct columns so the app can report cleanly
+        cols = ["tiploc","crs","station_name"] + DAYS + ["weekly_total"]
+        return pd.DataFrame(columns=cols)
     return pd.DataFrame(rows).sort_values("weekly_total", ascending=False).reset_index(drop=True)
 
 def _hash_file_map(file_map):
@@ -240,6 +247,17 @@ def run_parse(file_hash, file_map, passenger_only, stp_tuple):
     schedules, tiploc_map = parse_cif(cif_iter, passenger_only, set(stp_tuple))
     print("DEBUG run_parse: parse_cif done, schedules={} tiplocs={}".format(
         len(schedules), len(tiploc_map)))
+    # Show STP distribution so we can diagnose filtering issues
+    from collections import Counter
+    stp_counts = Counter(s["stp"] for s in schedules)
+    status_counts = Counter(s.get("status","?") for s in schedules)
+    print("DEBUG STP distribution: {}".format(dict(stp_counts)))
+    print("DEBUG Status distribution: {}".format(dict(status_counts)))
+    if schedules:
+        sample = schedules[0]
+        print("DEBUG First schedule: uid={} days={} stp={} stops_count={}".format(
+            sample.get("uid"), sample.get("days_run"), sample.get("stp"),
+            len(sample.get("stops",[]))))
 
     if msn_lines:
         print("DEBUG run_parse: merging MSN")
@@ -418,6 +436,10 @@ st.markdown("## Weekly train calls by station")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Stations shown",        "{:,}".format(len(df)))
 c2.metric("Total stations parsed", "{:,}".format(len(df_full[df_full["crs"] != ""])))
+if len(df_full) == 0:
+    st.error("No schedules found in the CIF file. Check the debug prints in the logs.")
+    st.stop()
+
 c3.metric("Busiest station",
           (df.iloc[0]["station_name"] or df.iloc[0]["tiploc"]) if len(df) else "—")
 c4.metric("Busiest weekly total",
