@@ -8,7 +8,7 @@ import hashlib
 import io
 import traceback
 import zipfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date
 
 import pandas as pd
@@ -30,7 +30,7 @@ BAR_COLOURS = ["#2a78d6"]*5 + ["#eb6834"]*2
 
 NR_URL = (
     "https://publicdatafeeds.networkrail.co.uk"
-    "/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full"
+    "/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full.CIF.gz"
 )
 
 # ---------------------------------------------------------------------------
@@ -216,24 +216,29 @@ def build_df(counts, tiploc_map):
     return pd.DataFrame(rows).sort_values("weekly_total", ascending=False).reset_index(drop=True)
 
 def _hash_file_map(file_map):
-    """Hash file contents so we can cache without storing raw bytes."""
     h = hashlib.md5()
     for fname in sorted(file_map.keys()):
         h.update(fname.encode())
-        h.update(file_map[fname][:65536])   # first 64KB is enough to detect changes
+        h.update(file_map[fname][:65536])
         h.update(str(len(file_map[fname])).encode())
     return h.hexdigest()
 
-@st.cache_data(show_spinner=False)
 def run_parse(file_hash, file_map, passenger_only, stp_tuple):
-    """file_hash is only used as the cache key; file_map holds the data."""
     print("DEBUG run_parse: start hash={} files={}".format(
         file_hash, list(file_map.keys())))
     cif_iter = None
     msn_lines = None
 
     for fname, raw in file_map.items():
-        print("DEBUG run_parse: opening stream for {}".format(fname))
+        print("DEBUG run_parse: opening stream for {}, size={}, first_bytes={}".format(
+            fname, len(raw), raw[:16].hex()))
+        # Peek at content to confirm format
+        try:
+            import gzip as _gz
+            sample = _gz.decompress(raw[:4096]) if raw[:2] == b"\x1f\x8b" else raw[:4096]
+            print("DEBUG first 200 chars of content: {!r}".format(sample[:200].decode("latin-1")))
+        except Exception as pe:
+            print("DEBUG peek failed: {}".format(pe))
         ci, ml = _open_cif_stream(raw, fname)
         if ci is not None and cif_iter is None:
             cif_iter = ci
@@ -243,21 +248,30 @@ def run_parse(file_hash, file_map, passenger_only, stp_tuple):
     if cif_iter is None:
         raise ValueError("No CIF data found in uploaded file.")
 
-    print("DEBUG run_parse: parse_cif streaming start")
+    import sys, itertools
+    print("DEBUG run_parse: parse_cif streaming start", flush=True, file=sys.stderr)
+    # Peek at first few lines to confirm CIF format
+    cif_iter, peek_iter = itertools.tee(cif_iter)
+    for i, ln in enumerate(peek_iter):
+        print("DEBUG CIF line {}: {!r}".format(i, ln[:80]), flush=True, file=sys.stderr)
+        if i >= 4:
+            break
     schedules, tiploc_map = parse_cif(cif_iter, passenger_only, set(stp_tuple))
+    import sys
     print("DEBUG run_parse: parse_cif done, schedules={} tiplocs={}".format(
-        len(schedules), len(tiploc_map)))
+        len(schedules), len(tiploc_map)), flush=True, file=sys.stderr)
     # Show STP distribution so we can diagnose filtering issues
-    from collections import Counter
     stp_counts = Counter(s["stp"] for s in schedules)
     status_counts = Counter(s.get("status","?") for s in schedules)
-    print("DEBUG STP distribution: {}".format(dict(stp_counts)))
-    print("DEBUG Status distribution: {}".format(dict(status_counts)))
+    print("DEBUG STP distribution: {}".format(dict(stp_counts)), flush=True, file=sys.stderr)
+    print("DEBUG Status distribution: {}".format(dict(status_counts)), flush=True, file=sys.stderr)
     if schedules:
         sample = schedules[0]
         print("DEBUG First schedule: uid={} days={} stp={} stops_count={}".format(
             sample.get("uid"), sample.get("days_run"), sample.get("stp"),
-            len(sample.get("stops",[]))))
+            len(sample.get("stops",[]))), flush=True, file=sys.stderr)
+    else:
+        print("DEBUG WARNING: zero schedules parsed!", flush=True, file=sys.stderr)
 
     if msn_lines:
         print("DEBUG run_parse: merging MSN")
@@ -327,13 +341,13 @@ with st.sidebar:
 
         ready = bool(_u and _p)
 
-        if "cif_fetched" in st.session_state:
+        if "cif_fetched_v2" in st.session_state:
             st.success("CIF ready ({:.1f} MB).".format(
-                st.session_state["cif_fetched_mb"]))
-            file_map["CIF_ALL_FULL_DAILY.gz"] = st.session_state["cif_fetched"]
+                st.session_state["cif_fetched_mb_v2"]))
+            file_map["CIF_ALL_FULL_DAILY.gz"] = st.session_state["cif_fetched_v2"]
             if st.button("Fetch fresh copy"):
-                del st.session_state["cif_fetched"]
-                del st.session_state["cif_fetched_mb"]
+                del st.session_state["cif_fetched_v2"]
+                del st.session_state["cif_fetched_mb_v2"]
         else:
             if st.button("Fetch & parse CIF", disabled=not ready, type="primary"):
                 with st.spinner("Downloading from Network Rail (~50 MB)..."):
@@ -342,8 +356,8 @@ with st.sidebar:
                                             allow_redirects=True, timeout=300)
                         resp.raise_for_status()
                         raw = resp.content
-                        st.session_state["cif_fetched"] = raw
-                        st.session_state["cif_fetched_mb"] = len(raw) / 1e6
+                        st.session_state["cif_fetched_v2"] = raw
+                        st.session_state["cif_fetched_mb_v2"] = len(raw) / 1e6
                         file_map["CIF_ALL_FULL_DAILY.gz"] = raw
                         st.success("Fetched {:.1f} MB.".format(len(raw) / 1e6))
                     except Exception as ex:
@@ -391,22 +405,33 @@ if not file_map:
     )
     st.stop()
 
-# Parse
-print("DEBUG: starting parse, passenger_only={}, stp={}".format(passenger_only, stp_options))
-try:
-    print("DEBUG: calling run_parse")
-    df_full = run_parse(
-        _hash_file_map(file_map),
-        file_map,
-        passenger_only,
-        tuple(sorted(stp_options)) if stp_options else ("P",),
-    )
-    print("DEBUG: run_parse done, rows={}".format(len(df_full)))
-except Exception as e:
-    print("DEBUG: parse exception: {}".format(traceback.format_exc()))
-    st.error("Parse error: {} — {}".format(type(e).__name__, e))
-    st.code(traceback.format_exc())
-    st.stop()
+# Parse — use session_state as cache (avoids st.cache_data suppressing stdout)
+_cache_key = "parsed_{}_{}_{}".format(
+    _hash_file_map(file_map),
+    passenger_only,
+    "_".join(sorted(stp_options)) if stp_options else "P"
+)
+print("DEBUG: cache_key={}".format(_cache_key))
+
+if _cache_key in st.session_state:
+    print("DEBUG: using cached result")
+    df_full = st.session_state[_cache_key]
+else:
+    print("DEBUG: starting parse, passenger_only={}, stp={}".format(passenger_only, stp_options))
+    try:
+        df_full = run_parse(
+            _cache_key,
+            file_map,
+            passenger_only,
+            tuple(sorted(stp_options)) if stp_options else ("P",),
+        )
+        print("DEBUG: run_parse done, rows={}".format(len(df_full)))
+        st.session_state[_cache_key] = df_full
+    except Exception as e:
+        print("DEBUG: parse exception: {}".format(traceback.format_exc()))
+        st.error("Parse error: {} — {}".format(type(e).__name__, e))
+        st.code(traceback.format_exc())
+        st.stop()
 
 # Filter
 print("DEBUG: starting filter")
