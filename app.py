@@ -315,7 +315,7 @@ def _hash_file_map(file_map):
         h.update(str(len(file_map[fname])).encode())
     return h.hexdigest()
 
-def run_parse(file_hash, file_map, passenger_only, stp_tuple):
+def run_parse(file_hash, file_map, passenger_only, stp_tuple, debug_lookup=""):
     print("DEBUG run_parse: start hash={} files={}".format(
         file_hash, list(file_map.keys())))
     cif_iter = None
@@ -378,6 +378,43 @@ def run_parse(file_hash, file_map, passenger_only, stp_tuple):
             len(sample.get("stops",[]))), flush=True, file=sys.stderr)
     else:
         print("DEBUG WARNING: zero schedules parsed!", flush=True, file=sys.stderr)
+
+    # --- Manual station diagnostic -----------------------------------
+    if debug_lookup.strip():
+        q = debug_lookup.strip().upper()
+        matched_tiplocs = set()
+        for t, info in tiploc_map.items():
+            if q == t.upper() or q == (info.get("crs") or "").upper() \
+               or q in (info.get("name") or "").upper():
+                matched_tiplocs.add(t)
+        # Also catch it even if not in tiploc_map at all (raw TIPLOC match)
+        matched_tiplocs.add(q)
+
+        print("=" * 70)
+        print("DIAGNOSTIC LOOKUP: '{}' matched TIPLOCs: {}".format(
+            debug_lookup, matched_tiplocs))
+        print("=" * 70)
+
+        relevant = [s for s in schedules
+                    if any(t in matched_tiplocs for t in s.get("stops", []))]
+        print("Found {} raw schedules (pre-STP) calling at matched TIPLOCs".format(
+            len(relevant)))
+
+        stp_dist = Counter(s["stp"] for s in relevant)
+        print("STP distribution among these: {}".format(dict(stp_dist)))
+
+        for s in sorted(relevant, key=lambda x: (x["uid"], x["stp"]))[:60]:
+            print("  uid={:8s} stp={} days={} from={} to={} n_stops={} "
+                  "has_target={}".format(
+                s["uid"], s["stp"], s["days_run"],
+                s["date_from"], s["date_to"],
+                len(s.get("stops", [])),
+                any(t in matched_tiplocs for t in s.get("stops", []))
+            ))
+        if len(relevant) > 60:
+            print("  ... and {} more".format(len(relevant) - 60))
+        print("=" * 70)
+    # --------------------------------------------------------------------
 
     if msn_lines:
         print("DEBUG run_parse: merging MSN")
@@ -533,6 +570,15 @@ with st.sidebar:
                                format_func=lambda c: c.replace("_"," ").title())
     top_n       = st.slider("Top N", 10, 500, 100, step=10)
 
+    st.divider()
+    st.subheader("Debug")
+    debug_lookup = st.text_input(
+        "Diagnose a station (TIPLOC / CRS / name)",
+        placeholder="e.g. Albany Park, AYP, ALBYPK",
+        help="Dumps every raw schedule found for this station to the logs, "
+             "before STP resolution — useful for tracking down undercounts.",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -553,10 +599,11 @@ if not file_map:
     st.stop()
 
 # Parse — use session_state as cache (avoids st.cache_data suppressing stdout)
-_cache_key = "parsed_v5_{}_{}_{}".format(
+_cache_key = "parsed_v5_{}_{}_{}_{}".format(
     _hash_file_map(file_map),
     passenger_only,
-    "_".join(sorted(stp_options)) if stp_options else "P"
+    "_".join(sorted(stp_options)) if stp_options else "P",
+    debug_lookup.strip(),
 )
 print("DEBUG: cache_key={}".format(_cache_key))
 
@@ -571,6 +618,7 @@ else:
             file_map,
             passenger_only,
             tuple(sorted(stp_options)) if stp_options else ("P",),
+            debug_lookup=debug_lookup,
         )
         print("DEBUG: run_parse done, rows={}, file_date={}".format(len(df_full), _file_date))
         st.session_state[_cache_key] = (df_full, _file_date)
