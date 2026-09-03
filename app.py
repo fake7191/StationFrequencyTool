@@ -152,26 +152,33 @@ def parse_stations_xml(raw):
 
 def parse_orr_station_list(path_or_bytes):
     """
-    Parse the ORR "NATIONAL_RAIL_STATION_LOG" xlsx (Master sheet, column A
-    = station name). Returns a set of normalised station names for
-    name-based filtering — an independent, authoritative check on top of
-    the TIPLOC-based XML filter.
-    Normalisation: uppercase + collapsed whitespace, so minor formatting
-    differences between sources don't cause false negatives.
+    Parse the ORR "NATIONAL_RAIL_STATION_LOG" xlsx (Master sheet).
+    Column A = station name, Column B = CRS Code.
+    This is the authoritative "is this a real station" list — only CRS
+    codes appearing here should be treated as a station.
+    Returns (crs_set, name_set): CRS codes (upper, stripped) for the
+    primary filter, and normalised names kept as a fallback for any row
+    that's missing a CRS code.
     """
     try:
         import openpyxl
         wb = openpyxl.load_workbook(path_or_bytes, read_only=True, data_only=True)
         ws = wb["Master"]
-        names = set()
-        for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
-            if row[0]:
-                names.add(_normalise_name(row[0]))
-        print("DEBUG parse_orr_station_list: {} station names loaded".format(len(names)))
-        return names
+        crs_set = set()
+        name_set = set()
+        for row in ws.iter_rows(min_row=2, max_col=2, values_only=True):
+            name, crs = (row[0], row[1]) if len(row) > 1 else (row[0], None)
+            if crs and str(crs).strip():
+                crs_set.add(str(crs).strip().upper())
+            elif name:
+                # No CRS on this row — fall back to name matching for it
+                name_set.add(_normalise_name(name))
+        print("DEBUG parse_orr_station_list: {} CRS codes, {} name-only fallback rows".format(
+            len(crs_set), len(name_set)))
+        return crs_set, name_set
     except Exception as e:
         print("DEBUG parse_orr_station_list: failed: {}".format(e))
-        return set()
+        return set(), set()
 
 
 def _normalise_name(name):
@@ -585,12 +592,15 @@ try:
 except Exception as _e:
     print("Could not load bundled StationsRefData.xml: {}".format(_e))
 
-# Load bundled ORR station usage list if present in repo
+# Load bundled ORR station usage list if present in repo — this is the
+# authoritative "is this a real station" source (CRS-based).
+_bundled_orr_crs   = None
 _bundled_orr_names = None
 try:
     if _os.path.exists(ORR_STATIONS_XLSX_PATH):
-        _bundled_orr_names = parse_orr_station_list(ORR_STATIONS_XLSX_PATH)
-        print("Loaded {} station names from bundled ORR list".format(len(_bundled_orr_names)))
+        _bundled_orr_crs, _bundled_orr_names = parse_orr_station_list(ORR_STATIONS_XLSX_PATH)
+        print("Loaded {} CRS codes + {} fallback names from bundled ORR list".format(
+            len(_bundled_orr_crs), len(_bundled_orr_names)))
 except Exception as _e:
     print("Could not load bundled ORR station list: {}".format(_e))
 
@@ -691,10 +701,11 @@ with st.sidebar:
         help="Hides entries with no 3-letter CRS code (junctions, depots etc.)")
     xml_filter  = st.checkbox("Station reference filter", value=True,
         help="Only show TIPLOCs in StationsRefData.xml — removes non-passenger locations definitively.")
-    orr_filter  = st.checkbox("ORR station list filter", value=True,
-        help="Only show stations whose name appears in the ORR official "
-             "station usage list — an independent authoritative check.",
-        disabled=_bundled_orr_names is None)
+    orr_filter  = st.checkbox("ORR station list filter (authoritative)", value=True,
+        help="Only stations whose CRS code appears in the ORR official "
+             "station usage list are shown. This is the definitive "
+             "source of truth for what counts as a station.",
+        disabled=_bundled_orr_crs is None)
     jn_filter   = st.checkbox("Exclude junction / non-station names", value=True,
         help="Hides names containing Jn, Junction, Jct, Sidings, Depot, Loop, CS, TMD etc.")
     name_filter = st.text_input("Search name / CRS", placeholder="e.g. Edinburgh")
@@ -799,10 +810,17 @@ try:
                           for part in str(t).split("+"))
         )]
         print("DEBUG: xml filter done, rows={}".format(len(df)))
-    if orr_filter and _bundled_orr_names:
-        df = df[df["station_name"].apply(
-            lambda n: _normalise_name(n) in _bundled_orr_names
-        )]
+    if orr_filter and (_bundled_orr_crs or _bundled_orr_names):
+        def _in_orr_list(row):
+            crs = str(row["crs"]).strip().upper()
+            if crs and _bundled_orr_crs and crs in _bundled_orr_crs:
+                return True
+            # Fallback to name matching only for rows the ORR list itself
+            # had no CRS for (rare — a handful of entries in the source file)
+            if _bundled_orr_names:
+                return _normalise_name(row["station_name"]) in _bundled_orr_names
+            return False
+        df = df[df.apply(_in_orr_list, axis=1)]
         print("DEBUG: orr filter done, rows={}".format(len(df)))
     if jn_filter:
         df = df[~df["station_name"].str.contains(_JN_PATTERN, regex=True, na=False)]
