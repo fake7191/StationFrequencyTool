@@ -9,7 +9,7 @@ import io
 import traceback
 import zipfile
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -117,87 +117,138 @@ def parse_cif(line_iter, passenger_only=True, stp_include=None):
         stp_include = {"P","O","N"}
     tiploc_map, schedules = {}, []
     cur, stops, active = None, [], False
+    file_date = None   # extracted from HD record
+
     for raw in line_iter:
         line = raw.rstrip("\r\n")
         if len(line) < 2:
             continue
         rt = line[0:2]
-        if rt == "TI":
+
+        # HD record: file header — extract the file reference date
+        # HD layout: [0:2]=HD, [2:22]=file mainframe ID, [22:28]=date (DDMMYY), [28:34]=time
+        if rt == "HD":
+            if len(line) >= 28 and file_date is None:
+                raw_date = line[22:28].strip()
+                if len(raw_date) == 6:
+                    try:
+                        dd, mm, yy = int(raw_date[0:2]), int(raw_date[2:4]), int(raw_date[4:6])
+                        year = 2000 + yy if yy < 60 else 1900 + yy
+                        file_date = date(year, mm, dd)
+                        print("DEBUG HD: file_date={}".format(file_date))
+                    except Exception:
+                        pass
+
+        elif rt == "TI":
             if len(line) >= 56:
                 t = line[2:9].strip()
                 if t and t not in tiploc_map:
                     tiploc_map[t] = {"name": line[18:44].strip(), "crs": line[53:56].strip()}
+
         elif rt == "BS":
             if active and cur and stops:
                 cur["stops"] = stops; schedules.append(cur)
             cur, stops, active = None, [], False
             if len(line) < 30 or line[2] == "D":
                 continue
-            # STP indicator is at pos 79 on a full 80-char line
-            # NR CIF lines can occasionally be shorter — default to P
             stp    = line[79].strip() if len(line) >= 80 else "P"
             status = line[29].strip()
             if stp not in stp_include:
                 continue
             if passenger_only and status not in PASSENGER_STATUSES:
                 continue
-            cur = {"uid": line[3:9].strip(),
+            cur = {"uid":       line[3:9].strip(),
                    "date_from": _parse_date(line[9:15]),
                    "date_to":   _parse_date(line[15:21]),
                    "days_run":  line[21:28],
-                   "stp": stp}
+                   "stp":       stp}
             active = True
+
         elif rt == "LO" and active:
             t = line[2:9].strip()
             if len(line) >= 19 and line[15:19].strip():
                 stops.append(t)
+
         elif rt == "LI" and active:
             t = line[2:9].strip()
-            pa = line[25:29].strip() if len(line) >= 29 else ""
+            pa  = line[25:29].strip() if len(line) >= 29 else ""
             pd_ = line[29:33].strip() if len(line) >= 33 else ""
-            act = line[42:54] if len(line) >= 54 else ""
+            act = line[42:54]         if len(line) >= 54 else ""
             if (pa or pd_) and _public_stop(act):
                 stops.append(t)
+
         elif rt == "LT" and active:
-            t = line[2:9].strip()
+            t  = line[2:9].strip()
             pa = line[15:19].strip() if len(line) >= 19 else ""
             if pa:
                 stops.append(t)
             if stops:
                 cur["stops"] = stops; schedules.append(cur)
             cur, stops, active = None, [], False
+
         elif rt == "ZZ":
             if active and cur and stops:
                 cur["stops"] = stops; schedules.append(cur)
             break
-    return schedules, tiploc_map
+
+    return schedules, tiploc_map, file_date
 
 def apply_stp(schedules):
+    # C (cancellation) and O (overlay) both suppress the P for overlapping dates.
+    # O is then included itself; C is never counted.
     by_uid = defaultdict(list)
     for s in schedules:
         by_uid[s["uid"]].append(s)
     result = []
     for group in by_uid.values():
-        cancels = [s for s in group if s["stp"] == "C"]
+        suppressors = [s for s in group if s["stp"] in ("C", "O")]
         for s in group:
             if s["stp"] == "C":
                 continue
-            if s["stp"] == "P" and cancels:
+            if s["stp"] == "P" and suppressors:
                 pf, pt = s["date_from"], s["date_to"]
-                if any(c["date_from"] and c["date_to"] and pf and pt
-                       and c["date_from"] <= pt and c["date_to"] >= pf
-                       for c in cancels):
+                if any(
+                    sup["date_from"] and sup["date_to"] and pf and pt
+                    and sup["date_from"] <= pt and sup["date_to"] >= pf
+                    for sup in suppressors
+                ):
                     continue
             result.append(s)
     return result
 
-def count_calls(schedules):
+def _week_dates(ref_date):
+    """Return the Monday-Sunday dates for the week containing ref_date."""
+    monday = ref_date - timedelta(days=ref_date.weekday())
+    return [monday + timedelta(days=i) for i in range(7)]
+
+def count_calls(schedules, ref_date=None):
+    """
+    Count calls per TIPLOC per weekday.
+    If ref_date is given, only count schedules valid during that week
+    (i.e. date_from <= day <= date_to AND the day bit is set).
+    """
     counts = defaultdict(lambda: [0]*7)
+
+    if ref_date is not None:
+        week = _week_dates(ref_date)
+    else:
+        week = None
+
     for s in schedules:
         active = _active_days(s["days_run"])
-        for t in s.get("stops", []):
-            for d in active:
-                counts[t][d] += 1
+        df_, dt_ = s.get("date_from"), s.get("date_to")
+
+        for day_idx in active:
+            # If we have a reference week, check this weekday falls in the schedule's range
+            if week is not None:
+                day_date = week[day_idx]
+                if df_ and day_date < df_:
+                    continue
+                if dt_ and day_date > dt_:
+                    continue
+            for t in s.get("stops", []):
+                counts[t][day_idx] += 1
+
     return counts
 
 def build_df(counts, tiploc_map):
@@ -256,7 +307,8 @@ def run_parse(file_hash, file_map, passenger_only, stp_tuple):
         print("DEBUG CIF line {}: {!r}".format(i, ln[:80]), flush=True, file=sys.stderr)
         if i >= 4:
             break
-    schedules, tiploc_map = parse_cif(cif_iter, passenger_only, set(stp_tuple))
+    schedules, tiploc_map, file_date = parse_cif(cif_iter, passenger_only, set(stp_tuple))
+    print("DEBUG file_date={}".format(file_date))
     import sys
     print("DEBUG run_parse: parse_cif done, schedules={} tiplocs={}".format(
         len(schedules), len(tiploc_map)), flush=True, file=sys.stderr)
@@ -283,9 +335,9 @@ def run_parse(file_hash, file_map, passenger_only, stp_tuple):
                 if info["crs"]:  tiploc_map[t]["crs"]  = info["crs"]
 
     print("DEBUG run_parse: apply_stp + count_calls + build_df")
-    result = build_df(count_calls(apply_stp(schedules)), tiploc_map)
-    print("DEBUG run_parse: done, rows={}".format(len(result)))
-    return result
+    result = build_df(count_calls(apply_stp(schedules), ref_date=file_date), tiploc_map)
+    print("DEBUG run_parse: done, rows={} file_date={}".format(len(result), file_date))
+    return result, file_date
 
 def bar_chart(row, label):
     fig = go.Figure(go.Bar(
@@ -406,7 +458,7 @@ if not file_map:
     st.stop()
 
 # Parse — use session_state as cache (avoids st.cache_data suppressing stdout)
-_cache_key = "parsed_{}_{}_{}".format(
+_cache_key = "parsed_v3_{}_{}_{}".format(
     _hash_file_map(file_map),
     passenger_only,
     "_".join(sorted(stp_options)) if stp_options else "P"
@@ -415,18 +467,18 @@ print("DEBUG: cache_key={}".format(_cache_key))
 
 if _cache_key in st.session_state:
     print("DEBUG: using cached result")
-    df_full = st.session_state[_cache_key]
+    df_full, _file_date = st.session_state[_cache_key]
 else:
     print("DEBUG: starting parse, passenger_only={}, stp={}".format(passenger_only, stp_options))
     try:
-        df_full = run_parse(
+        df_full, _file_date = run_parse(
             _cache_key,
             file_map,
             passenger_only,
             tuple(sorted(stp_options)) if stp_options else ("P",),
         )
-        print("DEBUG: run_parse done, rows={}".format(len(df_full)))
-        st.session_state[_cache_key] = df_full
+        print("DEBUG: run_parse done, rows={}, file_date={}".format(len(df_full), _file_date))
+        st.session_state[_cache_key] = (df_full, _file_date)
     except Exception as e:
         print("DEBUG: parse exception: {}".format(traceback.format_exc()))
         st.error("Parse error: {} — {}".format(type(e).__name__, e))
@@ -458,6 +510,19 @@ except Exception as e:
 
 # Metrics
 st.markdown("## Weekly train calls by station")
+
+if _file_date is not None:
+    _monday = _file_date - timedelta(days=_file_date.weekday())
+    _sunday = _monday + timedelta(days=6)
+    st.caption("Timetable file dated **{}** — showing services valid in the week "
+               "**{} – {}**".format(
+                   _file_date.strftime("%d %b %Y"),
+                   _monday.strftime("%d %b %Y"),
+                   _sunday.strftime("%d %b %Y")))
+else:
+    st.caption("File date not found in CIF header — counts include all schedules "
+               "regardless of validity period.")
+
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Stations shown",        "{:,}".format(len(df)))
 c2.metric("Total stations parsed", "{:,}".format(len(df_full[df_full["crs"] != ""])))
