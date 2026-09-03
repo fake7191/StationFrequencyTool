@@ -630,7 +630,7 @@ else:
 
 # Non-station name patterns
 _JN_PATTERN = (
-    r"(?i)(\bJn\b|\bJct\b|Junction|Sidings|\bSiding\b|\bDepot\b|"
+    r"(?i)(?:\bJn\b|\bJct\b|Junction|Sidings|\bSiding\b|\bDepot\b|"
     r"\bLoop\b|\bChord\b|Crossover|\bTMD\b|Carriage Works|Stabling|"
     r"Headshunt|Engineers|Ground Frame|Signal Box|\bGF\b|"
     r"\bNorth Jn\b|\bSouth Jn\b|\bEast Jn\b|\bWest Jn\b)"
