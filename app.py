@@ -305,7 +305,61 @@ def build_df(counts, tiploc_map, station_tiplocs=None):
     if not rows:
         cols = ["tiploc","crs","station_name"] + DAYS + ["weekly_total"]
         return pd.DataFrame(columns=cols)
-    return pd.DataFrame(rows).sort_values("weekly_total", ascending=False).reset_index(drop=True)
+    df = pd.DataFrame(rows)
+    df = merge_by_crs(df)
+    return df.sort_values("weekly_total", ascending=False).reset_index(drop=True)
+
+
+def merge_by_crs(df):
+    """
+    Some physical stations have more than one TIPLOC in the CIF (separate
+    platforms, historical re-signalling, bay lines etc.) but only one CRS
+    code. Merge rows that share a non-blank CRS so each station appears once,
+    summing the day counts across all its TIPLOCs.
+    Rows with no CRS are left as-is (one row per TIPLOC).
+    Written without groupby().apply() to stay compatible across pandas
+    versions, whose group-column-exclusion behaviour changed between
+    pandas 2.x and 3.x.
+    """
+    has_crs = df["crs"].str.strip() != ""
+    with_crs    = df[has_crs].copy()
+    without_crs = df[~has_crs].copy()
+
+    if with_crs.empty:
+        return df
+
+    # Sum the numeric day columns + weekly_total per CRS
+    numeric_cols = DAYS + ["weekly_total"]
+    sums = with_crs.groupby("crs", as_index=False)[numeric_cols].sum()
+
+    # For tiploc: join all TIPLOCs sharing a CRS
+    tiplocs = (
+        with_crs.groupby("crs")["tiploc"]
+        .apply(lambda s: "+".join(sorted(s)))
+        .reset_index()
+        .rename(columns={"tiploc": "tiploc"})
+    )
+
+    # For station_name: pick the longest non-empty name per CRS
+    def _longest_name(s):
+        s = s.fillna("")
+        if (s.str.len() == 0).all():
+            return ""
+        return s.loc[s.str.len().idxmax()]
+
+    names = (
+        with_crs.groupby("crs")["station_name"]
+        .apply(_longest_name)
+        .reset_index()
+    )
+
+    merged = sums.merge(tiplocs, on="crs").merge(names, on="crs")
+    merged = merged[["tiploc", "crs", "station_name"] + numeric_cols]
+
+    if not without_crs.empty:
+        return pd.concat([merged, without_crs], ignore_index=True)
+    return merged
+
 
 def _hash_file_map(file_map):
     h = hashlib.md5()
@@ -610,7 +664,7 @@ if not file_map:
     st.stop()
 
 # Parse — use session_state as cache (avoids st.cache_data suppressing stdout)
-_cache_key = "parsed_v6_{}_{}_{}_{}".format(
+_cache_key = "parsed_v7_{}_{}_{}_{}".format(
     _hash_file_map(file_map),
     passenger_only,
     "_".join(sorted(stp_options)) if stp_options else "P",
