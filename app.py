@@ -610,7 +610,7 @@ if not file_map:
     st.stop()
 
 # Parse — use session_state as cache (avoids st.cache_data suppressing stdout)
-_cache_key = "parsed_v5_{}_{}_{}_{}".format(
+_cache_key = "parsed_v6_{}_{}_{}_{}".format(
     _hash_file_map(file_map),
     passenger_only,
     "_".join(sorted(stp_options)) if stp_options else "P",
@@ -618,10 +618,20 @@ _cache_key = "parsed_v5_{}_{}_{}_{}".format(
 )
 print("DEBUG: cache_key={}".format(_cache_key))
 
+df_full = None
+_file_date = None
+_debug_text = None
+
 if _cache_key in st.session_state:
     print("DEBUG: using cached result")
-    df_full, _file_date, _debug_text = st.session_state[_cache_key]
-else:
+    _cached = st.session_state[_cache_key]
+    if isinstance(_cached, tuple) and len(_cached) == 3:
+        df_full, _file_date, _debug_text = _cached
+    else:
+        print("DEBUG: cache entry shape mismatch, discarding and reparsing")
+        del st.session_state[_cache_key]
+
+if df_full is None:
     print("DEBUG: starting parse, passenger_only={}, stp={}".format(passenger_only, stp_options))
     try:
         df_full, _file_date, _debug_text = run_parse(
