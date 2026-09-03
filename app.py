@@ -480,13 +480,22 @@ with col_l:
     dcols = ["crs","station_name"]+DAYS+["weekly_total"]
     rmap  = {"crs":"CRS","station_name":"Station","weekly_total":"Weekly",
              **{d: d[:3].title() for d in DAYS}}
-    styled = (df[dcols].rename(columns=rmap).style
-              .background_gradient(subset=["Mon","Tue","Wed","Thu","Fri"],
-                                   cmap="Blues", vmin=0)
-              .background_gradient(subset=["Sat","Sun"], cmap="Oranges", vmin=0)
-              .background_gradient(subset=["Weekly"],    cmap="Purples", vmin=0)
-              .format("{:,.0f}", subset=["Mon","Tue","Wed","Thu","Fri","Sat","Sun","Weekly"]))
-    st.dataframe(styled, use_container_width=True, height=520)
+    _max = lambda col: int(df[col].max()) if len(df) else 1
+    st.dataframe(
+        df[dcols].rename(columns=rmap),
+        use_container_width=True,
+        height=520,
+        column_config={
+            "Mon":    st.column_config.ProgressColumn("Mon",    min_value=0, max_value=_max("monday"),       format="%d"),
+            "Tue":    st.column_config.ProgressColumn("Tue",    min_value=0, max_value=_max("tuesday"),      format="%d"),
+            "Wed":    st.column_config.ProgressColumn("Wed",    min_value=0, max_value=_max("wednesday"),    format="%d"),
+            "Thu":    st.column_config.ProgressColumn("Thu",    min_value=0, max_value=_max("thursday"),     format="%d"),
+            "Fri":    st.column_config.ProgressColumn("Fri",    min_value=0, max_value=_max("friday"),       format="%d"),
+            "Sat":    st.column_config.ProgressColumn("Sat",    min_value=0, max_value=_max("saturday"),     format="%d"),
+            "Sun":    st.column_config.ProgressColumn("Sun",    min_value=0, max_value=_max("sunday"),       format="%d"),
+            "Weekly": st.column_config.ProgressColumn("Weekly", min_value=0, max_value=_max("weekly_total"), format="%d"),
+        }
+    )
     st.download_button("Download full CSV",
                        df_full.to_csv(index=False).encode("utf-8"),
                        "station_calls.csv", "text/csv")
@@ -513,8 +522,7 @@ with col_r:
             "Type":  ["Weekday"]*5+["Weekend"]*2,
         })
         ddf["% of peak"] = (ddf["Calls"] / (ddf["Calls"].max() or 1) * 100).round(1)
-        st.dataframe(ddf.style.format({"Calls":"{:,}","% of peak":"{:.1f}%"}),
-                     use_container_width=True, hide_index=True)
+        st.dataframe(ddf, use_container_width=True, hide_index=True)
 
         m1,m2,m3 = st.columns(3)
         m1.metric("Weekday avg", "{:,}".format(int(sum(row[d] for d in DAYS[:5])/5)))
