@@ -38,7 +38,7 @@ ORR_STATIONS_XLSX_PATH = _os.path.join(
 
 NR_URL = (
     "https://publicdatafeeds.networkrail.co.uk"
-    "/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full"
+    "/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full.CIF.gz"
 )
 
 # ---------------------------------------------------------------------------
@@ -692,10 +692,24 @@ with st.sidebar:
                                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                                     "Chrome/124.0.0.0 Safari/537.36"
                                 ),
+                                # Some data feed endpoints appear to
+                                # content-negotiate between the legacy
+                                # fixed-width CIF and a newer JSON schema
+                                # based on Accept — request the CIF/binary
+                                # form explicitly rather than a generic "*/*".
+                                "Accept": (
+                                    "application/gzip, application/octet-stream, "
+                                    "text/plain, */*;q=0.5"
+                                ),
                             },
                             allow_redirects=True, timeout=300,
                         )
                         resp.raise_for_status()
+                        print("DEBUG NR fetch: status={} content-type={} content-length={}".format(
+                            resp.status_code,
+                            resp.headers.get("Content-Type"),
+                            resp.headers.get("Content-Length"),
+                        ))
                         raw = resp.content
                         st.session_state["cif_fetched_v2"] = raw
                         st.session_state["cif_fetched_mb_v2"] = len(raw) / 1e6
