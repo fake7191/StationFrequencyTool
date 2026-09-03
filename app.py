@@ -832,8 +832,13 @@ try:
               | df["tiploc"].str.upper().str.contains(q, na=False))
         df = df[mask]
         print("DEBUG: name filter done, rows={}".format(len(df)))
+    # Keep the fully-filtered set (no name search, all quality filters
+    # applied, no Top N cutoff) for CSV export — the on-screen table
+    # additionally applies the name search and Top N below.
+    df_export = df.sort_values(sort_col, ascending=False).reset_index(drop=True)
     df = df.sort_values(sort_col, ascending=False).head(top_n).reset_index(drop=True)
-    print("DEBUG: filter complete, final rows={}".format(len(df)))
+    print("DEBUG: filter complete, final rows={}, export rows={}".format(
+        len(df), len(df_export)))
 except Exception as e:
     print("DEBUG: filter exception: {}".format(traceback.format_exc()))
     st.error("Filter error: {} — {}".format(type(e).__name__, e))
@@ -893,8 +898,8 @@ with col_l:
             "Weekly": st.column_config.ProgressColumn("Weekly", min_value=0, max_value=_max("weekly_total"), format="%d"),
         }
     )
-    st.download_button("Download full CSV",
-                       df_full.to_csv(index=False).encode("utf-8"),
+    st.download_button("Download filtered CSV ({} stations)".format(len(df_export)),
+                       df_export.to_csv(index=False).encode("utf-8"),
                        "station_calls.csv", "text/csv")
 
 with col_r:
