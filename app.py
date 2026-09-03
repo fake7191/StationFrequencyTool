@@ -309,36 +309,28 @@ with st.sidebar:
 
         ready = bool(_u and _p)
 
-        st.markdown("**Step 1 — fetch the file to your machine:**")
-
-        if "cif_bytes" in st.session_state:
-            _mb = len(st.session_state["cif_bytes"]) / 1e6
-            st.download_button(
-                label="Save cif_latest.gz  ({:.1f} MB)".format(_mb),
-                data=st.session_state["cif_bytes"],
-                file_name="cif_latest.gz",
-                mime="application/gzip",
-            )
-            if st.button("Refresh (fetch again)"):
-                del st.session_state["cif_bytes"]
+        if "cif_fetched" in st.session_state:
+            st.success("CIF ready ({:.1f} MB).".format(
+                st.session_state["cif_fetched_mb"]))
+            file_map["CIF_ALL_FULL_DAILY.gz"] = st.session_state["cif_fetched"]
+            if st.button("Fetch fresh copy"):
+                del st.session_state["cif_fetched"]
+                del st.session_state["cif_fetched_mb"]
         else:
-            if st.button("Fetch CIF from Network Rail", disabled=not ready):
-                with st.spinner("Downloading (~50 MB)..."):
+            if st.button("Fetch & parse CIF", disabled=not ready, type="primary"):
+                with st.spinner("Downloading from Network Rail (~50 MB)..."):
                     try:
                         resp = requests.get(NR_URL, auth=(_u, _p),
                                             allow_redirects=True, timeout=300)
                         resp.raise_for_status()
-                        st.session_state["cif_bytes"] = resp.content
-                        st.success("Fetched {:.1f} MB — click Save above.".format(
-                            len(resp.content)/1e6))
+                        raw = resp.content
+                        st.session_state["cif_fetched"] = raw
+                        st.session_state["cif_fetched_mb"] = len(raw) / 1e6
+                        file_map["CIF_ALL_FULL_DAILY.gz"] = raw
+                        st.success("Fetched {:.1f} MB.".format(len(raw) / 1e6))
                     except Exception as ex:
                         st.error("Fetch failed: {}".format(ex))
 
-        st.markdown("**Step 2 — upload it here:**")
-        up = st.file_uploader("Upload cif_latest.gz",
-                              type=["gz","zip","mca","cif"], key="up1")
-        if up is not None:
-            file_map[up.name] = up.read()
 
     else:
         up = st.file_uploader("Upload CIF file",
@@ -374,9 +366,9 @@ for fname, raw in file_map.items():
 if not file_map:
     st.markdown("## UK Train Frequency Explorer")
     st.info(
-        "Use the sidebar to fetch or upload a CIF timetable file.\n\n"
-        "**Download from Network Rail** — fetches the file on this server "
-        "then offers it as a browser download. Upload it back in Step 2.\n\n"
+        "Use the sidebar to load a CIF timetable file.\n\n"
+        "**Download from Network Rail** — click Fetch & parse to download "
+        "and process the timetable automatically. No upload needed.\n\n"
         "**Upload file** — upload a TTIS zip, Network Rail .gz, or .MCA directly."
     )
     st.stop()
