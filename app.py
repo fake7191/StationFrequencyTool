@@ -658,14 +658,30 @@ with st.sidebar:
                 st.session_state["cif_fetch_in_progress"] = True
                 with st.spinner("Downloading from Network Rail (~50 MB)..."):
                     try:
-                        resp = requests.get(NR_URL, auth=(_u, _p),
-                                            allow_redirects=True, timeout=300)
+                        resp = requests.get(
+                            NR_URL,
+                            auth=(_u, _p),
+                            headers={
+                                "User-Agent": (
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    "Chrome/124.0.0.0 Safari/537.36"
+                                ),
+                            },
+                            allow_redirects=True, timeout=300,
+                        )
                         resp.raise_for_status()
                         raw = resp.content
                         st.session_state["cif_fetched_v2"] = raw
                         st.session_state["cif_fetched_mb_v2"] = len(raw) / 1e6
                         file_map["CIF_ALL_FULL_DAILY.gz"] = raw
                         st.success("Fetched {:.1f} MB.".format(len(raw) / 1e6))
+                    except requests.HTTPError as ex:
+                        detail = ""
+                        if ex.response is not None:
+                            detail = " | response body (first 300 chars): {}".format(
+                                ex.response.text[:300])
+                        st.error("Fetch failed: {}{}".format(ex, detail))
                     except Exception as ex:
                         st.error("Fetch failed: {}".format(ex))
                     finally:
