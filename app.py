@@ -28,6 +28,11 @@ DAY_LABELS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
 PASSENGER_STATUSES = {"P","1","5"}
 BAR_COLOURS = ["#2a78d6"]*5 + ["#eb6834"]*2
 
+# Path to the bundled station reference file (committed to the repo)
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+STATIONS_XML_PATH = _os.path.join(_HERE, "StationsRefData.xml")
+
 NR_URL = (
     "https://publicdatafeeds.networkrail.co.uk"
     "/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full.CIF.gz"
@@ -77,6 +82,10 @@ def _open_cif_stream(raw, filename=""):
                 msn_lines = _decode(zf.read(zname))
         return cif_iter, msn_lines
 
+    # XML station reference — handled separately in run_parse, skip here
+    if name.endswith(".XML"):
+        return None, None
+
     # plain text already in memory
     print("DEBUG: opening as plain text")
     lines = _decode(raw)
@@ -111,6 +120,32 @@ def parse_msn(lines):
         if t:
             out[t] = {"name": line[1:27].strip(), "crs": line[36:39].strip()}
     return out
+
+def parse_stations_xml(raw):
+    """
+    Parse the National Rail StationsRefData.xml.
+    Returns a set of TIPLOCs that are real passenger stations
+    (have both a TIPLOC and a CRS code in the reference data).
+    Also returns a dict of tiploc -> {name, crs} for name overrides.
+    """
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(raw)
+    except Exception as e:
+        print("DEBUG parse_stations_xml: failed to parse XML: {}".format(e))
+        return set(), {}
+    valid = set()
+    names = {}
+    for station in root.findall("Station"):
+        tiploc = (station.findtext("Tiploc") or "").strip()
+        crs    = (station.findtext("CRS") or "").strip()
+        name   = (station.findtext("Name") or "").strip()
+        if tiploc and crs:
+            valid.add(tiploc)
+            names[tiploc] = {"name": name, "crs": crs}
+    print("DEBUG parse_stations_xml: {} valid station TIPLOCs".format(len(valid)))
+    return valid, names
+
 
 def parse_cif(line_iter, passenger_only=True, stp_include=None):
     if stp_include is None:
@@ -193,67 +228,74 @@ def parse_cif(line_iter, passenger_only=True, stp_include=None):
 
     return schedules, tiploc_map, file_date
 
-def apply_stp(schedules):
-    # C (cancellation) and O (overlay) both suppress the P for overlapping dates.
-    # O is then included itself; C is never counted.
-    by_uid = defaultdict(list)
-    for s in schedules:
-        by_uid[s["uid"]].append(s)
-    result = []
-    for group in by_uid.values():
-        suppressors = [s for s in group if s["stp"] in ("C", "O")]
-        for s in group:
-            if s["stp"] == "C":
-                continue
-            if s["stp"] == "P" and suppressors:
-                pf, pt = s["date_from"], s["date_to"]
-                if any(
-                    sup["date_from"] and sup["date_to"] and pf and pt
-                    and sup["date_from"] <= pt and sup["date_to"] >= pf
-                    for sup in suppressors
-                ):
-                    continue
-            result.append(s)
-    return result
-
 def _week_dates(ref_date):
-    """Return the Monday-Sunday dates for the week containing ref_date."""
     monday = ref_date - timedelta(days=ref_date.weekday())
     return [monday + timedelta(days=i) for i in range(7)]
 
+
+def apply_stp(schedules):
+    # Remove STP cancellations; keep P, O, N.
+    # Overlay suppression is handled day-by-day in count_calls so a
+    # P running Mon-Fri is not dropped just because an O covers Wednesday.
+    return [s for s in schedules if s["stp"] != "C"]
+
+
 def count_calls(schedules, ref_date=None):
-    """
-    Count calls per TIPLOC per weekday.
-    If ref_date is given, only count schedules valid during that week
-    (i.e. date_from <= day <= date_to AND the day bit is set).
-    """
+    # No date context: simple bitmask count, no STP resolution
+    if ref_date is None:
+        counts = defaultdict(lambda: [0]*7)
+        for s in schedules:
+            for day_idx in _active_days(s["days_run"]):
+                for t in s.get("stops", []):
+                    counts[t][day_idx] += 1
+        return counts
+
+    week = _week_dates(ref_date)
+
+    # Group by UID for per-day STP resolution
+    by_uid = defaultdict(list)
+    for s in schedules:
+        by_uid[s["uid"]].append(s)
+
     counts = defaultdict(lambda: [0]*7)
 
-    if ref_date is not None:
-        week = _week_dates(ref_date)
-    else:
-        week = None
+    for uid, group in by_uid.items():
+        p_scheds = [s for s in group if s["stp"] == "P"]
+        o_scheds = [s for s in group if s["stp"] in ("O", "N")]
 
-    for s in schedules:
-        active = _active_days(s["days_run"])
-        df_, dt_ = s.get("date_from"), s.get("date_to")
+        for day_idx, day_date in enumerate(week):
 
-        for day_idx in active:
-            # If we have a reference week, check this weekday falls in the schedule's range
-            if week is not None:
-                day_date = week[day_idx]
-                if df_ and day_date < df_:
-                    continue
-                if dt_ and day_date > dt_:
-                    continue
-            for t in s.get("stops", []):
-                counts[t][day_idx] += 1
+            def runs_on(s, day_idx=day_idx, day_date=day_date):
+                return (
+                    day_idx in _active_days(s["days_run"])
+                    and (s["date_from"] is None or s["date_from"] <= day_date)
+                    and (s["date_to"]   is None or s["date_to"]   >= day_date)
+                )
+
+            # Which O/N schedules actually run on this date?
+            active_o = [s for s in o_scheds if runs_on(s)]
+
+            # Count O/N calls
+            for s in active_o:
+                for t in s.get("stops", []):
+                    counts[t][day_idx] += 1
+
+            # Count P calls only where no O/N is running for this UID/day
+            if not active_o:
+                for s in p_scheds:
+                    if runs_on(s):
+                        for t in s.get("stops", []):
+                            counts[t][day_idx] += 1
 
     return counts
 
-def build_df(counts, tiploc_map):
+
+def build_df(counts, tiploc_map, station_tiplocs=None):
     rows = []
     for t, dc in counts.items():
+        # If an XML station list was provided, skip TIPLOCs not in it
+        if station_tiplocs is not None and t not in station_tiplocs:
+            continue
         info = tiploc_map.get(t, {"name":"","crs":""})
         rows.append({"tiploc": t,
                      "crs": info.get("crs",""),
@@ -261,7 +303,6 @@ def build_df(counts, tiploc_map):
                      **{DAYS[i]: dc[i] for i in range(7)},
                      "weekly_total": sum(dc)})
     if not rows:
-        # Return empty DataFrame with correct columns so the app can report cleanly
         cols = ["tiploc","crs","station_name"] + DAYS + ["weekly_total"]
         return pd.DataFrame(columns=cols)
     return pd.DataFrame(rows).sort_values("weekly_total", ascending=False).reset_index(drop=True)
@@ -295,6 +336,19 @@ def run_parse(file_hash, file_map, passenger_only, stp_tuple):
             cif_iter = ci
         if ml is not None and msn_lines is None:
             msn_lines = ml
+
+    # Extract XML station reference if provided; fall back to bundled file
+    station_tiplocs = None
+    station_names_xml = {}
+    for fname, raw in file_map.items():
+        if fname.upper().endswith(".XML"):
+            station_tiplocs, station_names_xml = parse_stations_xml(raw)
+            print("DEBUG: loaded {} station TIPLOCs from uploaded XML".format(len(station_tiplocs)))
+            break
+    if station_tiplocs is None and _bundled_station_tiplocs is not None:
+        station_tiplocs  = _bundled_station_tiplocs
+        station_names_xml = _bundled_station_names
+        print("DEBUG: using {} station TIPLOCs from bundled XML".format(len(station_tiplocs)))
 
     if cif_iter is None:
         raise ValueError("No CIF data found in uploaded file.")
@@ -334,8 +388,21 @@ def run_parse(file_hash, file_map, passenger_only, stp_tuple):
                 if info["name"]: tiploc_map[t]["name"] = info["name"]
                 if info["crs"]:  tiploc_map[t]["crs"]  = info["crs"]
 
+    # XML names take highest priority — they're the official public-facing names
+    if station_names_xml:
+        for t, info in station_names_xml.items():
+            if t not in tiploc_map:
+                tiploc_map[t] = info
+            else:
+                if info["name"]: tiploc_map[t]["name"] = info["name"]
+                if info["crs"]:  tiploc_map[t]["crs"]  = info["crs"]
+
     print("DEBUG run_parse: apply_stp + count_calls + build_df")
-    result = build_df(count_calls(apply_stp(schedules), ref_date=file_date), tiploc_map)
+    result = build_df(
+        count_calls(apply_stp(schedules), ref_date=file_date),
+        tiploc_map,
+        station_tiplocs=station_tiplocs,
+    )
     print("DEBUG run_parse: done, rows={} file_date={}".format(len(result), file_date))
     return result, file_date
 
@@ -359,6 +426,17 @@ def bar_chart(row, label):
 # Sidebar
 # ---------------------------------------------------------------------------
 
+# Load bundled StationsRefData.xml if present in repo
+_bundled_station_tiplocs = None
+_bundled_station_names   = {}
+try:
+    if _os.path.exists(STATIONS_XML_PATH):
+        with open(STATIONS_XML_PATH, "rb") as _f:
+            _bundled_station_tiplocs, _bundled_station_names = parse_stations_xml(_f.read())
+        print("Loaded {} station TIPLOCs from bundled XML".format(len(_bundled_station_tiplocs)))
+except Exception as _e:
+    print("Could not load bundled StationsRefData.xml: {}".format(_e))
+
 # Read secrets safely — must be the very first thing that touches st.secrets
 try:
     _secret_user = st.secrets["network_rail"]["username"]
@@ -371,6 +449,8 @@ file_map       = {}
 passenger_only = True
 stp_options    = ["P","O","N"]
 crs_only       = True
+xml_filter     = True
+jn_filter      = True
 name_filter    = ""
 sort_col       = "weekly_total"
 top_n          = 100
@@ -415,10 +495,18 @@ with st.sidebar:
                     except Exception as ex:
                         st.error("Fetch failed: {}".format(ex))
 
+        xml_up = st.file_uploader(
+            "Optional: upload StationsRefData.xml to filter to passenger stations",
+            type=["xml"], key="xml_nr",
+        )
+        if xml_up is not None:
+            file_map[xml_up.name] = xml_up.read()
+
 
     else:
+        st.caption("Upload the CIF (.gz or .zip) and optionally the StationsRefData.xml to filter to passenger stations only.")
         up = st.file_uploader("Upload CIF file",
-                              type=["gz","zip","mca","cif","msn"],
+                              type=["gz","zip","mca","cif","msn","xml"],
                               accept_multiple_files=True, key="up2")
         if up:
             for f in up:
@@ -430,14 +518,21 @@ with st.sidebar:
     stp_options    = st.multiselect("STP indicators",
                                     options=["P","O","N"], default=["P","O","N"])
 
+
     st.divider()
     st.subheader("Filter")
-    crs_only    = st.checkbox("CRS code stations only", value=True)
+    crs_only    = st.checkbox("CRS code stations only", value=True,
+        help="Hides entries with no 3-letter CRS code (junctions, depots etc.)")
+    xml_filter  = st.checkbox("Station reference filter", value=True,
+        help="Only show TIPLOCs in StationsRefData.xml — removes non-passenger locations definitively.")
+    jn_filter   = st.checkbox("Exclude junction / non-station names", value=True,
+        help="Hides names containing Jn, Junction, Jct, Sidings, Depot, Loop, CS, TMD etc.")
     name_filter = st.text_input("Search name / CRS", placeholder="e.g. Edinburgh")
     sort_col    = st.selectbox("Sort by",
                                ["weekly_total"]+DAYS,
                                format_func=lambda c: c.replace("_"," ").title())
     top_n       = st.slider("Top N", 10, 500, 100, step=10)
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -458,7 +553,7 @@ if not file_map:
     st.stop()
 
 # Parse — use session_state as cache (avoids st.cache_data suppressing stdout)
-_cache_key = "parsed_v3_{}_{}_{}".format(
+_cache_key = "parsed_v5_{}_{}_{}".format(
     _hash_file_map(file_map),
     passenger_only,
     "_".join(sorted(stp_options)) if stp_options else "P"
@@ -485,6 +580,14 @@ else:
         st.code(traceback.format_exc())
         st.stop()
 
+# Non-station name patterns
+_JN_PATTERN = (
+    r"(?i)(\bJn\b|\bJct\b|Junction|Sidings|\bSiding\b|\bDepot\b|"
+    r"\bLoop\b|\bChord\b|Crossover|\bTMD\b|Carriage Works|Stabling|"
+    r"Headshunt|Engineers|Ground Frame|Signal Box|\bGF\b|"
+    r"\bNorth Jn\b|\bSouth Jn\b|\bEast Jn\b|\bWest Jn\b)"
+)
+
 # Filter
 print("DEBUG: starting filter")
 try:
@@ -493,6 +596,12 @@ try:
     if crs_only:
         df = df[df["crs"].str.strip() != ""]
         print("DEBUG: crs filter done, rows={}".format(len(df)))
+    if xml_filter and _bundled_station_tiplocs:
+        df = df[df["tiploc"].isin(_bundled_station_tiplocs)]
+        print("DEBUG: xml filter done, rows={}".format(len(df)))
+    if jn_filter:
+        df = df[~df["station_name"].str.contains(_JN_PATTERN, regex=True, na=False)]
+        print("DEBUG: jn filter done, rows={}".format(len(df)))
     if name_filter.strip():
         q = name_filter.strip().upper()
         mask = (df["station_name"].str.upper().str.contains(q, na=False)
