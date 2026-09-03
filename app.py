@@ -38,7 +38,7 @@ ORR_STATIONS_XLSX_PATH = _os.path.join(
 
 NR_URL = (
     "https://publicdatafeeds.networkrail.co.uk"
-    "/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full.CIF.gz"
+    "/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full"
 )
 
 # ---------------------------------------------------------------------------
