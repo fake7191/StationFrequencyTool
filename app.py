@@ -380,6 +380,7 @@ def run_parse(file_hash, file_map, passenger_only, stp_tuple, debug_lookup=""):
         print("DEBUG WARNING: zero schedules parsed!", flush=True, file=sys.stderr)
 
     # --- Manual station diagnostic -----------------------------------
+    debug_text = None
     if debug_lookup.strip():
         q = debug_lookup.strip().upper()
         matched_tiplocs = set()
@@ -390,30 +391,40 @@ def run_parse(file_hash, file_map, passenger_only, stp_tuple, debug_lookup=""):
         # Also catch it even if not in tiploc_map at all (raw TIPLOC match)
         matched_tiplocs.add(q)
 
-        print("=" * 70)
-        print("DIAGNOSTIC LOOKUP: '{}' matched TIPLOCs: {}".format(
-            debug_lookup, matched_tiplocs))
-        print("=" * 70)
+        lines_out = []
+        lines_out.append("DIAGNOSTIC LOOKUP: '{}' matched TIPLOCs: {}".format(
+            debug_lookup, sorted(matched_tiplocs)))
+        lines_out.append("")
 
         relevant = [s for s in schedules
                     if any(t in matched_tiplocs for t in s.get("stops", []))]
-        print("Found {} raw schedules (pre-STP) calling at matched TIPLOCs".format(
+        lines_out.append("Found {} raw schedules (pre-STP) calling at matched TIPLOCs".format(
             len(relevant)))
 
         stp_dist = Counter(s["stp"] for s in relevant)
-        print("STP distribution among these: {}".format(dict(stp_dist)))
+        lines_out.append("STP distribution among these: {}".format(dict(stp_dist)))
+        lines_out.append("")
+        lines_out.append("{:8s} {:4s} {:8s} {:12s} {:12s} {:8s} {}".format(
+            "uid", "stp", "days", "from", "to", "n_stops", "has_target"))
+        lines_out.append("-" * 70)
 
-        for s in sorted(relevant, key=lambda x: (x["uid"], x["stp"]))[:60]:
-            print("  uid={:8s} stp={} days={} from={} to={} n_stops={} "
-                  "has_target={}".format(
+        for s in sorted(relevant, key=lambda x: (x["uid"], x["stp"])):
+            lines_out.append("{:8s} {:4s} {:8s} {:12s} {:12s} {:<8d} {}".format(
                 s["uid"], s["stp"], s["days_run"],
-                s["date_from"], s["date_to"],
+                str(s["date_from"]), str(s["date_to"]),
                 len(s.get("stops", [])),
                 any(t in matched_tiplocs for t in s.get("stops", []))
             ))
-        if len(relevant) > 60:
-            print("  ... and {} more".format(len(relevant) - 60))
-        print("=" * 70)
+
+        # Also show what the reference week / file date resolved to
+        lines_out.append("")
+        lines_out.append("file_date = {}".format(file_date))
+        if file_date is not None:
+            wk = _week_dates(file_date)
+            lines_out.append("reference week = {} to {}".format(wk[0], wk[6]))
+
+        debug_text = "\n".join(lines_out)
+        print("DIAGNOSTIC LOOKUP for '{}': {} matches".format(debug_lookup, len(relevant)))
     # --------------------------------------------------------------------
 
     if msn_lines:
@@ -441,7 +452,7 @@ def run_parse(file_hash, file_map, passenger_only, stp_tuple, debug_lookup=""):
         station_tiplocs=station_tiplocs,
     )
     print("DEBUG run_parse: done, rows={} file_date={}".format(len(result), file_date))
-    return result, file_date
+    return result, file_date, debug_text
 
 def bar_chart(row, label):
     fig = go.Figure(go.Bar(
@@ -609,11 +620,11 @@ print("DEBUG: cache_key={}".format(_cache_key))
 
 if _cache_key in st.session_state:
     print("DEBUG: using cached result")
-    df_full, _file_date = st.session_state[_cache_key]
+    df_full, _file_date, _debug_text = st.session_state[_cache_key]
 else:
     print("DEBUG: starting parse, passenger_only={}, stp={}".format(passenger_only, stp_options))
     try:
-        df_full, _file_date = run_parse(
+        df_full, _file_date, _debug_text = run_parse(
             _cache_key,
             file_map,
             passenger_only,
@@ -621,12 +632,16 @@ else:
             debug_lookup=debug_lookup,
         )
         print("DEBUG: run_parse done, rows={}, file_date={}".format(len(df_full), _file_date))
-        st.session_state[_cache_key] = (df_full, _file_date)
+        st.session_state[_cache_key] = (df_full, _file_date, _debug_text)
     except Exception as e:
         print("DEBUG: parse exception: {}".format(traceback.format_exc()))
         st.error("Parse error: {} — {}".format(type(e).__name__, e))
         st.code(traceback.format_exc())
         st.stop()
+
+if _debug_text:
+    with st.expander("🔍 Diagnostic lookup result for '{}'".format(debug_lookup), expanded=True):
+        st.code(_debug_text, language="text")
 
 # Non-station name patterns
 _JN_PATTERN = (
