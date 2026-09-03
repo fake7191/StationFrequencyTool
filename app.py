@@ -191,9 +191,34 @@ def parse_cif(line_iter, passenger_only=True, stp_include=None):
     tiploc_map, schedules = {}, []
     cur, stops, active = None, [], False
     file_date = None   # extracted from HD record
+    _checked_format = False
 
     for raw in line_iter:
         line = raw.rstrip("\r\n")
+
+        # One-time format sanity check on the first non-empty line.
+        # The classic fixed-width CIF always starts with 'HD' — if the
+        # file is actually the newer JSON timetable schema (or anything
+        # else), fail loudly here instead of silently mis-parsing every
+        # subsequent line as garbage fixed-width fields.
+        if not _checked_format and line.strip():
+            _checked_format = True
+            stripped = line.lstrip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                raise ValueError(
+                    "This file looks like JSON (starts with '{}'), not the "
+                    "classic fixed-width CIF format this parser expects. "
+                    "Network Rail's feed offers both a CIF and a JSON "
+                    "timetable — please download the CIF (.gz) version, "
+                    "not the JSON one.".format(stripped[0])
+                )
+            if not line[0:2] == "HD":
+                raise ValueError(
+                    "This file doesn't look like a CIF timetable — the "
+                    "first record should start with 'HD' but got {!r}. "
+                    "Check you've downloaded the correct file.".format(line[0:2])
+                )
+
         if len(line) < 2:
             continue
         rt = line[0:2]
