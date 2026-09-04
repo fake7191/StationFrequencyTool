@@ -156,9 +156,12 @@ def parse_orr_station_list(path_or_bytes):
     Column A = station name, Column B = CRS Code.
     This is the authoritative "is this a real station" list — only CRS
     codes appearing here should be treated as a station.
-    Returns (crs_set, name_set): CRS codes (upper, stripped) for the
-    primary filter, and normalised names kept as a fallback for any row
-    that's missing a CRS code.
+    Returns (crs_set, name_set, crs_to_name):
+      crs_set     — CRS codes (upper, stripped) for the primary filter
+      name_set    — normalised names, fallback for rows missing a CRS
+      crs_to_name — CRS -> official station name, used to seed rows for
+                    stations with zero calls in a given week so they still
+                    appear in the results rather than being silently omitted.
     """
     try:
         import openpyxl
@@ -166,19 +169,23 @@ def parse_orr_station_list(path_or_bytes):
         ws = wb["Master"]
         crs_set = set()
         name_set = set()
+        crs_to_name = {}
         for row in ws.iter_rows(min_row=2, max_col=2, values_only=True):
             name, crs = (row[0], row[1]) if len(row) > 1 else (row[0], None)
             if crs and str(crs).strip():
-                crs_set.add(str(crs).strip().upper())
+                crs_u = str(crs).strip().upper()
+                crs_set.add(crs_u)
+                if name and crs_u not in crs_to_name:
+                    crs_to_name[crs_u] = str(name).strip()
             elif name:
                 # No CRS on this row — fall back to name matching for it
                 name_set.add(_normalise_name(name))
         print("DEBUG parse_orr_station_list: {} CRS codes, {} name-only fallback rows".format(
             len(crs_set), len(name_set)))
-        return crs_set, name_set
+        return crs_set, name_set, crs_to_name
     except Exception as e:
         print("DEBUG parse_orr_station_list: failed: {}".format(e))
-        return set(), set()
+        return set(), set(), {}
 
 
 def _normalise_name(name):
@@ -619,11 +626,13 @@ except Exception as _e:
 
 # Load bundled ORR station usage list if present in repo — this is the
 # authoritative "is this a real station" source (CRS-based).
-_bundled_orr_crs   = None
-_bundled_orr_names = None
+_bundled_orr_crs      = None
+_bundled_orr_names    = None
+_bundled_orr_crs_name = {}
 try:
     if _os.path.exists(ORR_STATIONS_XLSX_PATH):
-        _bundled_orr_crs, _bundled_orr_names = parse_orr_station_list(ORR_STATIONS_XLSX_PATH)
+        _bundled_orr_crs, _bundled_orr_names, _bundled_orr_crs_name = \
+            parse_orr_station_list(ORR_STATIONS_XLSX_PATH)
         print("Loaded {} CRS codes + {} fallback names from bundled ORR list".format(
             len(_bundled_orr_crs), len(_bundled_orr_names)))
 except Exception as _e:
@@ -841,6 +850,22 @@ if _debug_text:
     with st.expander("🔍 Diagnostic lookup result for '{}'".format(debug_lookup), expanded=True):
         st.code(_debug_text, language="text")
 
+# Seed rows for any authoritative station that had zero calls this week —
+# otherwise a station with no service simply never appears, since it never
+# accumulates a count during parsing.
+if _bundled_orr_crs_name:
+    existing_crs = set(df_full["crs"].astype(str).str.strip().str.upper())
+    missing = [
+        {"tiploc": "", "crs": crs, "station_name": name,
+         **{d: 0 for d in DAYS}, "weekly_total": 0}
+        for crs, name in _bundled_orr_crs_name.items()
+        if crs not in existing_crs
+    ]
+    if missing:
+        print("DEBUG: adding {} zero-call stations from ORR list".format(len(missing)))
+        df_full = pd.concat([df_full, pd.DataFrame(missing)], ignore_index=True)
+        df_full = df_full.sort_values("weekly_total", ascending=False).reset_index(drop=True)
+
 # Non-station name patterns
 _JN_PATTERN = (
     r"(?i)(?:\bJn\b|\bJct\b|Junction|Sidings|\bSiding\b|\bDepot\b|"
@@ -860,9 +885,14 @@ try:
     if xml_filter and _bundled_station_tiplocs:
         # tiploc may be a merged "TIPLOC1+TIPLOC2" string (see merge_by_crs) —
         # match if ANY of the constituent TIPLOCs is a known station.
+        # A blank tiploc means this row was seeded from the ORR list for a
+        # station with zero calls this week (never appeared in the CIF at
+        # all) — it's already validated via the ORR filter, so let it
+        # through here rather than excluding it for lacking a TIPLOC.
         df = df[df["tiploc"].apply(
-            lambda t: any(part in _bundled_station_tiplocs
-                          for part in str(t).split("+"))
+            lambda t: t == "" or any(
+                part in _bundled_station_tiplocs for part in str(t).split("+")
+            )
         )]
         print("DEBUG: xml filter done, rows={}".format(len(df)))
     if orr_filter and (_bundled_orr_crs or _bundled_orr_names):
